@@ -1,8 +1,6 @@
 /**
  * AGENTE ORO HORIZONS CLUB - Backend
- * Uso: node server.js
- * Requiere: npm install express playwright cors
- * Luego: npx playwright install chromium
+ * Para sonterraclub.com
  */
 
 const express = require('express');
@@ -10,7 +8,14 @@ const cors = require('cors');
 const { chromium } = require('playwright');
 
 const app = express();
-app.use(cors()); // Permite que tu web Sonterra se conecte
+
+// CORS: permite peticiones desde sonterraclub.com
+app.use(cors({
+  origin: '*', // Abierto para que funcione desde WordPress
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type']
+}));
+
 app.use(express.json());
 
 const CREDENTIALS = {
@@ -23,10 +28,9 @@ const LOGIN_URL = 'https://login.orohorizonsclub.com/';
 // ─────────────────────────────────────────────
 // ENDPOINT PRINCIPAL: buscar hoteles
 // POST /buscar-hoteles
-// Body: { destino: "Cancun", checkin: "2025-04-01", checkout: "2025-04-07", huespedes: 2 }
 // ─────────────────────────────────────────────
 app.post('/buscar-hoteles', async (req, res) => {
-  const { destino, checkin, checkout, huespedes } = req.body;
+  const { destino, checkin, checkout } = req.body;
 
   if (!destino) {
     return res.status(400).json({ error: 'Falta el destino' });
@@ -36,140 +40,148 @@ app.post('/buscar-hoteles', async (req, res) => {
   try {
     console.log(`🔍 Buscando hoteles en: ${destino}`);
 
-    browser = await chromium.launch({
-      headless: true, // false para ver el navegador (debug)
-    });
+    browser = await chromium.launch({ headless: true });
 
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
     });
 
     const page = await context.newPage();
 
-    // ── PASO 1: Ir a la página y hacer login ──
-    console.log('🔐 Iniciando sesión...');
-    await page.goto(LOGIN_URL, { waitUntil: 'networkidle' });
-
-    // Clic en botón de login para abrir el modal
-    await page.click('a[href="#"]:has-text("Log in"), a:has-text("Log in to account")');
-    await page.waitForTimeout(1000);
-
-    // Llenar credenciales
-    await page.fill('input[name="username"], input[placeholder*="sername"], input[id*="user"]', CREDENTIALS.username);
-    await page.fill('input[name="password"], input[type="password"]', CREDENTIALS.password);
-
-    // Enviar login
-    await page.click('button:has-text("Log in"), input[type="submit"], .login-btn');
-    
-    // Esperar a que cargue el dashboard
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+    // ── PASO 1: Login ──
+    console.log('🔐 Abriendo página de login...');
+    await page.goto(LOGIN_URL, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(2000);
 
-    console.log('✅ Sesión iniciada. URL actual:', page.url());
+    // Clic en botón de login para abrir el modal
+    console.log('🖱️ Abriendo modal de login...');
+    try {
+      await page.click('text=Log in to account', { timeout: 5000 });
+    } catch {
+      try {
+        await page.click('text=Log in', { timeout: 5000 });
+      } catch {
+        await page.click('a[href="#"]', { timeout: 5000 });
+      }
+    }
+    await page.waitForTimeout(2000);
 
-    // ── PASO 2: Navegar a búsqueda de hoteles ──
+    // Llenar usuario
+    console.log('📝 Llenando credenciales...');
+    const userInput = await page.$('input[name="username"], input[placeholder*="sername"], input[placeholder*="Usuario"]');
+    if (userInput) await userInput.fill(CREDENTIALS.username);
+
+    const passInput = await page.$('input[type="password"]');
+    if (passInput) await passInput.fill(CREDENTIALS.password);
+
+    await page.waitForTimeout(1000);
+
+    // Enviar login
+    console.log('🚀 Enviando login...');
+    try {
+      await page.click('text=Log in to account', { timeout: 5000 });
+    } catch {
+      await page.click('button[type="submit"], input[type="submit"]', { timeout: 5000 });
+    }
+
+    await page.waitForTimeout(5000);
+    console.log('✅ Login enviado. URL:', page.url());
+
+    // Screenshot para debug
+    await page.screenshot({ path: '/tmp/post-login.png' });
+
+    // ── PASO 2: Buscar hoteles ──
     console.log('🏨 Buscando sección de hoteles...');
 
-    // Tomar screenshot para debug (opcional)
-    await page.screenshot({ path: '/tmp/dashboard.png' });
-
-    // Buscar menú de hoteles/viajes
-    const hotelLinks = await page.$$eval('a', links =>
-      links
-        .filter(a => /hotel|alojamiento|accommod|stay|viaje|travel/i.test(a.textContent + a.href))
-        .map(a => ({ text: a.textContent.trim(), href: a.href }))
+    // Buscar links de hoteles en la página actual
+    const todosLosLinks = await page.$$eval('a', links =>
+      links.map(a => ({ texto: a.textContent.trim(), href: a.href }))
+        .filter(l => l.href && l.texto)
     );
 
-    console.log('Links de hoteles encontrados:', hotelLinks.slice(0, 5));
+    console.log('Links disponibles:', todosLosLinks.slice(0, 15));
 
-    // Intentar ir a sección de hoteles
-    if (hotelLinks.length > 0) {
-      await page.goto(hotelLinks[0].href, { waitUntil: 'networkidle' });
+    // Encontrar link de hoteles
+    const linkHotel = todosLosLinks.find(l =>
+      /hotel|alojam|accommod|stay|hosped/i.test(l.texto + l.href)
+    );
+
+    if (linkHotel) {
+      console.log('🔗 Yendo a:', linkHotel.href);
+      await page.goto(linkHotel.href, { waitUntil: 'networkidle', timeout: 20000 });
       await page.waitForTimeout(2000);
     }
 
-    // ── PASO 3: Llenar búsqueda ──
-    // Intentar llenar campo de destino
-    const destinoInput = await page.$('input[placeholder*="estino"], input[placeholder*="city"], input[placeholder*="Ciudad"], input[name*="dest"], input[id*="dest"]');
-    
-    if (destinoInput) {
-      await destinoInput.fill(destino);
-      await page.waitForTimeout(1000);
-
-      // Autocompletar si aparece
-      const suggestion = await page.$('.autocomplete-item, .suggestion, [role="option"]');
-      if (suggestion) await suggestion.click();
+    // Intentar buscar destino
+    const inputDestino = await page.$('input[placeholder*="estino"], input[placeholder*="ity"], input[placeholder*="here"], input[name*="dest"], input[name*="location"]');
+    if (inputDestino) {
+      await inputDestino.fill(destino);
+      await page.waitForTimeout(1500);
+      // Seleccionar sugerencia si aparece
+      const sugerencia = await page.$('[class*="autocomplete"] li, [class*="suggest"] li, [role="option"]');
+      if (sugerencia) await sugerencia.click();
     }
 
-    // Fechas si existen los campos
     if (checkin) {
-      const checkinInput = await page.$('input[name*="checkin"], input[placeholder*="llegada"], input[type="date"]:first-of-type');
-      if (checkinInput) await checkinInput.fill(checkin);
+      const inputCheckin = await page.$('input[name*="checkin"], input[name*="check_in"], input[placeholder*="llegada"], input[placeholder*="heck-in"]');
+      if (inputCheckin) await inputCheckin.fill(checkin);
     }
 
     if (checkout) {
-      const checkoutInput = await page.$('input[name*="checkout"], input[placeholder*="salida"]');
-      if (checkoutInput) await checkoutInput.fill(checkout);
+      const inputCheckout = await page.$('input[name*="checkout"], input[name*="check_out"], input[placeholder*="salida"]');
+      if (inputCheckout) await inputCheckout.fill(checkout);
     }
 
-    // Botón buscar
-    const searchBtn = await page.$('button[type="submit"], button:has-text("Buscar"), button:has-text("Search"), input[type="submit"]');
-    if (searchBtn) {
-      await searchBtn.click();
-      await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 20000 }).catch(() => {});
-      await page.waitForTimeout(3000);
+    // Buscar
+    const btnBuscar = await page.$('button[type="submit"], input[type="submit"], button:has-text("Search"), button:has-text("Buscar")');
+    if (btnBuscar) {
+      await btnBuscar.click();
+      await page.waitForTimeout(5000);
     }
 
-    // ── PASO 4: Extraer resultados ──
-    console.log('📊 Extrayendo resultados...');
     await page.screenshot({ path: '/tmp/resultados.png' });
 
-    // Extraer tarjetas de hoteles (ajusta los selectores según la web real)
+    // ── PASO 3: Extraer resultados ──
+    console.log('📊 Extrayendo resultados...');
+
     const hoteles = await page.evaluate(() => {
       const resultados = [];
-      
-      // Selectores comunes de resultados de hotel
-      const cards = document.querySelectorAll(
-        '.hotel-card, .property-card, .result-card, .hotel-item, .listing-card, [class*="hotel"], [class*="property"], [class*="result"]'
-      );
+      const selectores = [
+        '.hotel-card', '.property-card', '.result-card', '.hotel-item',
+        '.listing-card', '.accommodation-card', '[class*="hotel"]',
+        '[class*="property"]', '[class*="result-item"]', 'article', '.card'
+      ];
+
+      let cards = [];
+      for (const sel of selectores) {
+        const found = document.querySelectorAll(sel);
+        if (found.length > 0) { cards = found; break; }
+      }
 
       cards.forEach((card, i) => {
-        if (i >= 20) return; // máximo 20 resultados
-
+        if (i >= 20) return;
         const nombre = card.querySelector('h1,h2,h3,h4,[class*="name"],[class*="title"]')?.textContent?.trim();
-        const precio = card.querySelector('[class*="price"],[class*="rate"],[class*="cost"],.precio,.price')?.textContent?.trim();
+        const precio = card.querySelector('[class*="price"],[class*="rate"],[class*="cost"],[class*="tarifa"]')?.textContent?.trim();
         const imagen = card.querySelector('img')?.src;
         const estrellas = card.querySelector('[class*="star"],[class*="rating"]')?.textContent?.trim();
         const descripcion = card.querySelector('p,[class*="desc"]')?.textContent?.trim()?.substring(0, 150);
         const enlace = card.querySelector('a')?.href;
-
-        if (nombre) {
+        if (nombre && nombre.length > 2) {
           resultados.push({ nombre, precio, imagen, estrellas, descripcion, enlace });
         }
       });
 
-      // Si no encontró cards específicas, buscar más genérico
-      if (resultados.length === 0) {
-        document.querySelectorAll('article, .card, .item').forEach((el, i) => {
-          if (i >= 10) return;
-          const nombre = el.querySelector('h2,h3,h4')?.textContent?.trim();
-          const precio = el.querySelector('[class*="price"]')?.textContent?.trim();
-          if (nombre) resultados.push({ nombre, precio });
-        });
-      }
-
       return resultados;
     });
 
-    console.log(`✅ Encontrados ${hoteles.length} hoteles`);
-
-    // Si no encontró nada estructurado, devolver el texto de la página
-    let textoPagina = '';
+    // Si no encontró resultados estructurados, devolver el texto visible
+    let paginaTexto = '';
     if (hoteles.length === 0) {
-      textoPagina = await page.evaluate(() => document.body.innerText.substring(0, 3000));
+      paginaTexto = await page.evaluate(() => document.body.innerText.substring(0, 2000));
     }
 
+    console.log(`✅ Encontrados: ${hoteles.length} hoteles`);
     await browser.close();
 
     res.json({
@@ -177,7 +189,7 @@ app.post('/buscar-hoteles', async (req, res) => {
       destino,
       total: hoteles.length,
       hoteles,
-      nota: hoteles.length === 0 ? 'No se encontraron resultados estructurados. Texto de página: ' + textoPagina : null
+      debug: hoteles.length === 0 ? paginaTexto : null
     });
 
   } catch (error) {
@@ -188,10 +200,9 @@ app.post('/buscar-hoteles', async (req, res) => {
 });
 
 // Health check
-app.get('/ping', (req, res) => res.json({ ok: true, mensaje: 'Agente activo 🤖' }));
+app.get('/ping', (req, res) => res.json({ ok: true, mensaje: '🤖 Agente Sonterra activo' }));
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`🤖 Agente corriendo en http://localhost:${PORT}`);
-  console.log(`📡 Endpoint: POST http://localhost:${PORT}/buscar-hoteles`);
+  console.log(`🤖 Agente corriendo en puerto ${PORT}`);
 });
