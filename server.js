@@ -9,7 +9,7 @@ app.use(express.json());
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 app.get('/ping', (req, res) => {
-  res.json({ ok: true, mensaje: '🤖 Agente Sonterra con Claude AI + Imágenes' });
+  res.json({ ok: true, mensaje: '🤖 Agente Sonterra v11 - Todos los hoteles' });
 });
 
 app.post('/buscar-hoteles', async (req, res) => {
@@ -22,14 +22,13 @@ app.post('/buscar-hoteles', async (req, res) => {
 
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote']
+      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
+             '--disable-gpu','--single-process','--no-zygote']
     });
 
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
+      viewport: { width: 1440, height: 900 },
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-      geolocation: { latitude: 19.4326, longitude: -99.1332 },
-      permissions: ['geolocation']
     });
 
     const page = await context.newPage();
@@ -47,24 +46,32 @@ app.post('/buscar-hoteles', async (req, res) => {
     await page.waitForTimeout(8000);
     console.log('✅ Login OK:', page.url());
 
-    // ── IR AL BUSCADOR ──
-    console.log('🏨 Buscador...');
+    // ── BUSCADOR ──
+    console.log('🏨 Abriendo buscador...');
     await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(4000);
 
-    // ── LLENAR DESTINO ──
-    console.log('📍 Destino:', destino);
+    // ── DESTINO: escribir y esperar sugerencias del portal ──
+    console.log('📍 Escribiendo destino:', destino);
     await page.waitForSelector('.ant-select-selection-search-input', { timeout: 10000 });
     await page.click('.ant-select-selection-search-input');
     await page.waitForTimeout(500);
-    await page.type('.ant-select-selection-search-input', destino, { delay: 150 });
-    await page.waitForTimeout(3000);
+    
+    // Escribir carácter a carácter para activar el autocomplete del portal
+    await page.type('.ant-select-selection-search-input', destino, { delay: 200 });
+    await page.waitForTimeout(3500);
 
+    // Intentar seleccionar la primera sugerencia del portal (tiene sus propias sugerencias)
     try {
       await page.waitForSelector('.ant-select-item-option', { timeout: 5000 });
-      await page.click('.ant-select-item-option');
-      console.log('✅ Sugerencia OK');
+      const sugerencias = await page.$$('.ant-select-item-option');
+      console.log(`📋 Sugerencias encontradas: ${sugerencias.length}`);
+      if (sugerencias.length > 0) {
+        await sugerencias[0].click(); // Primer resultado = más exacto
+        console.log('✅ Primera sugerencia seleccionada');
+      }
     } catch {
+      console.log('⚠️ Sin sugerencias, continuando con texto directo');
       await page.keyboard.press('Escape');
     }
     await page.waitForTimeout(1000);
@@ -86,127 +93,238 @@ app.post('/buscar-hoteles', async (req, res) => {
         }
         await page.click('button:has-text("Done")');
         await page.waitForTimeout(500);
+        console.log('✅ Fechas OK');
       } catch(e) { console.log('⚠️ Fechas:', e.message); }
     }
 
     // ── BUSCAR ──
-    console.log('🔍 Buscando...');
+    console.log('🔍 Ejecutando búsqueda...');
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(500);
-    await page.evaluate(() => { const b = document.querySelector('.search-button'); if (b) b.click(); });
+    await page.waitForTimeout(600);
+    await page.evaluate(() => {
+      const b = document.querySelector('.search-button');
+      if (b) b.click();
+    });
+
+    // Esperar resultados
     await page.waitForTimeout(12000);
-    console.log('📊 URL:', page.url());
+    console.log('📊 URL resultados:', page.url());
 
-    // ── EXTRAER DATOS COMPLETOS con imágenes ──
-    const datosExtraidos = await page.evaluate(() => {
-      const hoteles = [];
+    // ── SCROLL PARA CARGAR TODOS LOS HOTELES ──
+    console.log('📜 Haciendo scroll para cargar todos los resultados...');
+    let prevCount = 0;
+    let scrollRounds = 0;
+    
+    while (scrollRounds < 15) { // máx 15 scrolls
+      // Scroll al fondo
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(2500);
+      
+      // Contar hoteles actuales
+      const currentCount = await page.evaluate(() => {
+        // Buscar cards de hoteles - el portal usa clases específicas
+        const selectors = [
+          '.result-wrapper__hotel-card',
+          '[class*="hotel-card"]',
+          '[class*="HotelCard"]', 
+          '[class*="property-card"]',
+          '[class*="PropertyCard"]',
+          '.ant-card',
+          '[class*="result-card"]'
+        ];
+        for (const sel of selectors) {
+          const found = document.querySelectorAll(sel);
+          if (found.length > 2) return found.length;
+        }
+        // Fallback: buscar elementos que tengan precio y nombre
+        return document.querySelectorAll('[class*="card"],[class*="result"],[class*="hotel"]')
+          .length;
+      });
+      
+      console.log(`📦 Hoteles visibles: ${currentCount}`);
+      
+      if (currentCount === prevCount) {
+        scrollRounds++;
+        if (scrollRounds >= 3) break; // 3 intentos sin cambio = terminó
+      } else {
+        scrollRounds = 0;
+      }
+      prevCount = currentCount;
+    }
 
-      // Buscar todas las cards de resultados
-      const posiblesSelectores = [
-        '[class*="result"]', '[class*="hotel"]', '[class*="property"]',
-        '[class*="card"]', 'article'
+    // Scroll al inicio para que las imágenes se carguen
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(2000);
+    
+    // Hacer scroll lento para cargar imágenes lazy
+    const pageHeight = await page.evaluate(() => document.body.scrollHeight);
+    for (let pos = 0; pos < pageHeight; pos += 600) {
+      await page.evaluate(y => window.scrollTo(0, y), pos);
+      await page.waitForTimeout(300);
+    }
+    await page.waitForTimeout(2000);
+
+    // ── EXTRAER TODOS LOS HOTELES ──
+    console.log('🔄 Extrayendo datos de todos los hoteles...');
+    
+    const hoteles = await page.evaluate(() => {
+      const results = [];
+      const nombresVistos = new Set();
+
+      // Estrategia 1: selectores específicos del portal
+      const selectorsPrioridad = [
+        '.result-wrapper__hotel-card',
+        '[class*="hotel-card"]',
+        '[class*="HotelCard"]',
+        '[class*="PropertyCard"]',
+        '[class*="property-card"]',
+        '[class*="SearchResult"]',
+        '[class*="search-result-item"]',
+        '[class*="result-item"]',
+        '.ant-card-bordered',
       ];
 
       let cards = [];
-      for (const sel of posiblesSelectores) {
-        const found = [...document.querySelectorAll(sel)].filter(el => {
-          const txt = el.innerText || '';
-          return txt.length > 30 && el.querySelector('img, h2, h3, h4');
-        });
-        if (found.length >= 2) { cards = found.slice(0, 20); break; }
+      for (const sel of selectorsPrioridad) {
+        const found = document.querySelectorAll(sel);
+        if (found.length >= 3) {
+          cards = Array.from(found);
+          console.log(`Usando selector: ${sel}, encontrados: ${found.length}`);
+          break;
+        }
       }
 
-      cards.forEach(card => {
-        // Imágenes
-        const imgs = [...card.querySelectorAll('img')]
-          .map(i => i.src || i.dataset.src || '')
-          .filter(src => src && src.startsWith('http') && !src.includes('icon') && !src.includes('logo'));
-
-        // Nombre
-        const nombre = (
-          card.querySelector('h1,h2,h3,h4,[class*="name"],[class*="title"]')?.textContent || ''
-        ).trim();
-
-        // Precio - buscar el número más prominente
-        const todosTextos = card.innerText || '';
-        const precioMatch = todosTextos.match(/US\$\s*[\d,]+\.?\d*|From\s*US\$\s*[\d,]+|\$\s*[\d,]+/i);
-
-        // Rating/estrellas
-        const rating = (card.querySelector('[class*="rating"],[class*="star"],[class*="review"]')?.textContent || '').trim();
-
-        // Dirección/ubicación
-        const addr = (card.querySelector('[class*="address"],[class*="location"],[class*="distance"]')?.textContent || '').trim();
-
-        // Enlace
-        const enlace = card.querySelector('a[href*="membergetaways"], a[href*="hotel"], a[href*="property"]')?.href || '';
-
-        // Ahorro
-        const ahorro = (card.querySelector('[class*="save"],[class*="saving"],[class*="discount"]')?.textContent || '').trim();
-
-        if (nombre && nombre.length > 3) {
-          hoteles.push({
-            nombre,
-            precio: precioMatch ? precioMatch[0] : '',
-            imagenes: imgs.slice(0, 4),
-            imagen: imgs[0] || '',
-            estrellas: rating,
-            descripcion: addr.substring(0, 120),
-            enlace,
-            ahorro
-          });
+      // Estrategia 2: buscar por estructura (tiene imagen + precio)
+      if (cards.length < 3) {
+        const todos = document.querySelectorAll('div, article, li');
+        for (const el of todos) {
+          const tieneImg = el.querySelector('img[src*="travelapi"], img[src*="membergetaways"], img[src*="hotel"], img[src*="expedia"]');
+          const tieneNombre = el.querySelector('h1,h2,h3,h4');
+          const tienePrecio = el.innerText?.match(/US\$\s*[\d,]+/);
+          if (tieneImg && tieneNombre && tienePrecio) {
+            // Evitar duplicados por contenedor padre/hijo
+            const yaEsHijo = cards.some(c => c.contains(el) || el.contains(c));
+            if (!yaEsHijo) cards.push(el);
+          }
         }
-      });
+        console.log(`Estrategia 2: ${cards.length} cards`);
+      }
 
-      // Texto completo para Claude
-      const textoCompleto = document.body.innerText.substring(0, 8000);
-      const url = window.location.href;
+      // Procesar cada card
+      for (const card of cards) {
+        try {
+          // Nombre - evitar "Refundable" y textos de filtros
+          let nombre = '';
+          const posiblesNombres = card.querySelectorAll('h1,h2,h3,h4,strong,[class*="name"],[class*="title"],[class*="hotel-name"]');
+          for (const el of posiblesNombres) {
+            const txt = el.textContent.trim();
+            if (txt.length > 4 && txt.length < 120 && 
+                !txt.match(/^(refundable|non-refundable|save|from|per night|star rating|\d+ star|vacation rental|hotels|all|select|compare|view map|miles)/i)) {
+              nombre = txt;
+              break;
+            }
+          }
+          
+          if (!nombre || nombre.length < 4) continue;
+          if (nombresVistos.has(nombre)) continue; // Skip duplicados
+          nombresVistos.add(nombre);
 
-      return { hoteles, textoCompleto, url, total: hoteles.length };
+          // Imagen - buscar la mejor imagen disponible
+          let imagen = '';
+          const imgs = card.querySelectorAll('img');
+          for (const img of imgs) {
+            const src = img.src || img.dataset.src || img.dataset.lazySrc || '';
+            if (src && src.startsWith('http') && 
+                !src.includes('icon') && !src.includes('logo') && 
+                !src.includes('flag') && !src.includes('arrow') &&
+                !src.includes('svg') && (src.includes('travelapi') || src.includes('hotel') || 
+                src.includes('membergetaways') || src.includes('expedia') || 
+                src.includes('i.travelapi') || src.match(/\.(jpg|jpeg|png|webp)/i))) {
+              imagen = src;
+              break;
+            }
+          }
+          
+          // Si no tiene imagen propia, buscar srcset
+          if (!imagen) {
+            const imgs2 = card.querySelectorAll('img[srcset], img[data-src]');
+            for (const img of imgs2) {
+              const src = img.dataset.src || img.srcset?.split(' ')[0] || '';
+              if (src && src.startsWith('http')) { imagen = src; break; }
+            }
+          }
+
+          // Precio
+          const textoCard = card.innerText || '';
+          const precioMatch = textoCard.match(/US\$\s*[\d,]+\.?\d*|From\s+US\$\s*[\d,]+/i);
+          const precio = precioMatch ? precioMatch[0] : '';
+
+          // Rating / estrellas
+          const ratingEl = card.querySelector('[class*="rating"],[class*="review"],[class*="score"]');
+          const ratingTxt = ratingEl?.textContent?.trim() || '';
+          const ratingNum = ratingTxt.match(/[\d.]+/)?.[0] || '';
+
+          // Número de reviews
+          const reviewsMatch = textoCard.match(/\(?([\d,]+)\s*reviews?\)?/i);
+          const reviews = reviewsMatch ? reviewsMatch[1] : '';
+
+          // Estrellas
+          const starEl = card.querySelector('[class*="star"],[class*="Star"]');
+          const starTxt = starEl?.textContent?.trim() || '';
+          const estrellas = starTxt.match(/\d/)?.[0] || '';
+
+          // Ahorro
+          const saveMatch = textoCard.match(/save\s*\d+%/i);
+          const ahorro = saveMatch ? saveMatch[0] : '';
+
+          // Dirección
+          const addrEl = card.querySelector('[class*="address"],[class*="location"],[class*="distance"],[class*="miles"]');
+          const direccion = (addrEl?.textContent?.trim() || '').substring(0, 100);
+
+          // Enlace
+          const linkEl = card.querySelector('a[href*="hotel"], a[href*="property"], a[href*="membergetaways"], button[class*="select"]');
+          const enlace = linkEl?.href || '';
+
+          // Precio público (tachado)
+          const precioPublicoMatch = textoCard.match(/US\$\s*([\d,]+\.?\d*)\s*\n.*?per night/i);
+          const precioPublico = precioPublicoMatch ? `US$ ${precioPublicoMatch[1]}` : '';
+
+          results.push({
+            nombre, imagen, precio, estrellas, ratingNum,
+            reviews, ahorro, direccion, enlace, precioPublico
+          });
+        } catch(e) { /* skip */ }
+      }
+
+      return results;
     });
 
-    console.log(`📦 Datos extraídos: ${datosExtraidos.total} hoteles`);
+    console.log(`📦 Hoteles extraídos: ${hoteles.length}`);
 
-    // ── CLAUDE AI analiza y enriquece ──
-    console.log('🤖 Claude analizando...');
-
-    const prompt = `Eres un extractor de datos de hoteles. Analiza el siguiente texto de resultados de búsqueda de hoteles del portal membergetaways.com y devuelve información estructurada.
-
-URL: ${datosExtraidos.url}
-Destino buscado: ${destino}
-
-TEXTO DE LA PÁGINA:
-${datosExtraidos.textoCompleto}
-
-HOTELES YA EXTRAÍDOS (con imágenes y links):
-${JSON.stringify(datosExtraidos.hoteles, null, 2)}
-
-Tu tarea:
-1. Enriquece los datos ya extraídos con información del texto
-2. Para cada hotel incluye: nombre, precio (en USD por noche), estrellas (número), descripcion (dirección/ubicación corta), descripcion_larga (descripción del hotel), enlace, imagen (URL), imagenes (array de URLs), ahorro (ej: "Save 52%"), reviews (número de reviews si aparece), rating_numero (número como 4.4)
-
-Devuelve SOLO este JSON sin texto adicional ni backticks:
-{"hoteles":[{"nombre":"...","precio":"US$ XXX","estrellas":"5","rating_numero":"4.4","reviews":"1153 reviews","descripcion":"Boulevard Kukulkan...","descripcion_larga":"...","imagen":"https://...","imagenes":["https://..."],"enlace":"https://...","ahorro":"Save 52%"}]}
-
-Si no hay hoteles devuelve: {"hoteles":[]}`;
-
-    const response = await anthropic.messages.create({
-      model: 'claude-opus-4-5',
-      max_tokens: 4000,
-      messages: [{ role: 'user', content: prompt }]
-    });
-
-    let hoteles = datosExtraidos.hoteles; // fallback
-    try {
-      const txt = response.content[0].text.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(txt);
-      if (parsed.hoteles?.length > 0) hoteles = parsed.hoteles;
-    } catch(e) {
-      console.log('⚠️ Parse Claude error, usando datos directos');
-    }
-
+    // URL de resultados para el enlace
+    const urlResultados = page.url();
+    
     await browser.close();
-    console.log(`✅ Total hoteles: ${hoteles.length}`);
-    res.json({ ok: true, destino, total: hoteles.length, hoteles });
+
+    // Si hay muy pocos hoteles, Claude intenta interpretar la página
+    let hotelesTotales = hoteles.length;
+    
+    // Limpiar: remover hoteles sin nombre o con nombres genéricos
+    const hotelsFiltrados = hoteles.filter(h => 
+      h.nombre && 
+      h.nombre.length > 4 && 
+      !h.nombre.match(/^(refundable|hotel|property|vacation|rental|all|more|select|view|compare|star|rating|save|from|budget|amenities)/i)
+    );
+
+    console.log(`✅ Hoteles después de filtrar: ${hotelsFiltrados.length}`);
+
+    res.json({ 
+      ok: true, 
+      destino, 
+      total: hotelsFiltrados.length,
+      hoteles: hotelsFiltrados,
+      urlResultados
+    });
 
   } catch (error) {
     if (browser) await browser.close().catch(() => {});
@@ -216,4 +334,4 @@ Si no hay hoteles devuelve: {"hoteles":[]}`;
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 Puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 Agente v11 en puerto ${PORT}`));
