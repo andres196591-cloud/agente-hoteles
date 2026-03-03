@@ -135,7 +135,7 @@ app.post('/buscar-hoteles', async (req, res) => {
 
     // ── PASO 5: Buscar ──
     console.log('🔍 Presionando Find your hotel...');
-    await page.click('button:has-text("Find your hotel")');
+    await page.click('.search-button');
     await page.waitForTimeout(10000);
     console.log('📊 URL resultados:', page.url());
 
