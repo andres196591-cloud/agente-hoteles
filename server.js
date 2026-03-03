@@ -1,20 +1,22 @@
 const express = require('express');
 const cors = require('cors');
-const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 app.get('/ping', (req, res) => {
-  res.json({ ok: true, mensaje: '🤖 Agente Sonterra v11 - Todos los hoteles' });
+  res.json({ ok: true, mensaje: '🤖 Agente Sonterra v12' });
 });
 
 app.post('/buscar-hoteles', async (req, res) => {
   const { destino, checkin, checkout } = req.body;
   if (!destino) return res.status(400).json({ error: 'Falta el destino' });
+
+  // Extraer solo la ciudad (antes de la primera coma)
+  // "Tulum, Quintana Roo, México" → "Tulum"
+  const ciudadCorta = destino.split(',')[0].trim();
+  console.log(`🏙️ Destino original: "${destino}" → Ciudad: "${ciudadCorta}"`);
 
   let browser;
   try {
@@ -47,34 +49,34 @@ app.post('/buscar-hoteles', async (req, res) => {
     console.log('✅ Login OK:', page.url());
 
     // ── BUSCADOR ──
-    console.log('🏨 Abriendo buscador...');
     await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(4000);
 
-    // ── DESTINO: escribir y esperar sugerencias del portal ──
-    console.log('📍 Escribiendo destino:', destino);
+    // ── DESTINO: usar solo ciudad corta ──
+    console.log(`📍 Escribiendo "${ciudadCorta}" en el buscador del portal`);
     await page.waitForSelector('.ant-select-selection-search-input', { timeout: 10000 });
     await page.click('.ant-select-selection-search-input');
     await page.waitForTimeout(500);
-    
-    // Escribir carácter a carácter para activar el autocomplete del portal
-    await page.type('.ant-select-selection-search-input', destino, { delay: 200 });
+    await page.type('.ant-select-selection-search-input', ciudadCorta, { delay: 180 });
     await page.waitForTimeout(3500);
 
-    // Intentar seleccionar la primera sugerencia del portal (tiene sus propias sugerencias)
+    // Seleccionar primera sugerencia
     try {
       await page.waitForSelector('.ant-select-item-option', { timeout: 5000 });
-      const sugerencias = await page.$$('.ant-select-item-option');
-      console.log(`📋 Sugerencias encontradas: ${sugerencias.length}`);
-      if (sugerencias.length > 0) {
-        await sugerencias[0].click(); // Primer resultado = más exacto
-        console.log('✅ Primera sugerencia seleccionada');
+      const opts = await page.$$('.ant-select-item-option');
+      console.log(`📋 ${opts.length} sugerencias. Seleccionando primera...`);
+      if (opts.length > 0) {
+        const txt = await opts[0].textContent();
+        console.log(`   → "${txt}"`);
+        await opts[0].click();
       }
     } catch {
-      console.log('⚠️ Sin sugerencias, continuando con texto directo');
-      await page.keyboard.press('Escape');
+      console.log('⚠️ Sin sugerencias, usando Enter');
+      await page.keyboard.press('ArrowDown');
+      await page.waitForTimeout(200);
+      await page.keyboard.press('Enter');
     }
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
 
     // ── FECHAS ──
     if (checkin && checkout) {
@@ -82,12 +84,12 @@ app.post('/buscar-hoteles', async (req, res) => {
         await page.click('.date-picker__wrapper');
         await page.waitForTimeout(1500);
         const [,,dayIn] = checkin.split('-').map(Number);
+        const [,,dayOut] = checkout.split('-').map(Number);
         const sel = `.rdrDay:not(.rdrDayDisabled):not(.rdrDayPassive) .rdrDayNumber span`;
         for (const d of await page.$$(sel)) {
           if (parseInt(await d.textContent()) === dayIn) { await d.click(); break; }
         }
         await page.waitForTimeout(500);
-        const [,,dayOut] = checkout.split('-').map(Number);
         for (const d of await page.$$(sel)) {
           if (parseInt(await d.textContent()) === dayOut) { await d.click(); break; }
         }
@@ -100,230 +102,181 @@ app.post('/buscar-hoteles', async (req, res) => {
     // ── BUSCAR ──
     console.log('🔍 Ejecutando búsqueda...');
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(500);
     await page.evaluate(() => {
       const b = document.querySelector('.search-button');
-      if (b) b.click();
+      if (b) { b.dispatchEvent(new MouseEvent('click', {bubbles:true})); }
     });
+    await page.waitForTimeout(15000);
+    console.log('📊 URL:', page.url());
 
-    // Esperar resultados
-    await page.waitForTimeout(12000);
-    console.log('📊 URL resultados:', page.url());
+    // ── CONTAR RESULTADOS REALES ──
+    const totalEnPagina = await page.evaluate(() => {
+      const txt = document.body.innerText;
+      const m = txt.match(/We found ([\d,]+) properties/i);
+      return m ? parseInt(m[1].replace(',','')) : 0;
+    });
+    console.log(`📈 Total según el portal: ${totalEnPagina}`);
 
-    // ── SCROLL PARA CARGAR TODOS LOS HOTELES ──
-    console.log('📜 Haciendo scroll para cargar todos los resultados...');
-    let prevCount = 0;
-    let scrollRounds = 0;
-    
-    while (scrollRounds < 15) { // máx 15 scrolls
-      // Scroll al fondo
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await page.waitForTimeout(2500);
+    // ── SCROLL COMPLETO para cargar todos ──
+    if (totalEnPagina > 0) {
+      console.log('📜 Haciendo scroll para cargar todos...');
+      let intentosSinCambio = 0;
+      let countAnterior = 0;
       
-      // Contar hoteles actuales
-      const currentCount = await page.evaluate(() => {
-        // Buscar cards de hoteles - el portal usa clases específicas
-        const selectors = [
-          '.result-wrapper__hotel-card',
-          '[class*="hotel-card"]',
-          '[class*="HotelCard"]', 
-          '[class*="property-card"]',
-          '[class*="PropertyCard"]',
-          '.ant-card',
-          '[class*="result-card"]'
-        ];
-        for (const sel of selectors) {
-          const found = document.querySelectorAll(sel);
-          if (found.length > 2) return found.length;
-        }
-        // Fallback: buscar elementos que tengan precio y nombre
-        return document.querySelectorAll('[class*="card"],[class*="result"],[class*="hotel"]')
-          .length;
-      });
-      
-      console.log(`📦 Hoteles visibles: ${currentCount}`);
-      
-      if (currentCount === prevCount) {
-        scrollRounds++;
-        if (scrollRounds >= 3) break; // 3 intentos sin cambio = terminó
-      } else {
-        scrollRounds = 0;
+      while (intentosSinCambio < 4) {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForTimeout(3000);
+        
+        const countActual = await page.evaluate(() => {
+          // Contar por precio visible en pantalla
+          const precios = document.querySelectorAll('[class*="price"], [class*="Price"]');
+          return precios.length;
+        });
+        
+        console.log(`  📦 Elementos precio: ${countActual}`);
+        if (countActual === countAnterior) intentosSinCambio++;
+        else intentosSinCambio = 0;
+        countAnterior = countActual;
       }
-      prevCount = currentCount;
     }
 
-    // Scroll al inicio para que las imágenes se carguen
+    // Scroll lento para activar lazy loading de imágenes
     await page.evaluate(() => window.scrollTo(0, 0));
-    await page.waitForTimeout(2000);
-    
-    // Hacer scroll lento para cargar imágenes lazy
-    const pageHeight = await page.evaluate(() => document.body.scrollHeight);
-    for (let pos = 0; pos < pageHeight; pos += 600) {
-      await page.evaluate(y => window.scrollTo(0, y), pos);
-      await page.waitForTimeout(300);
+    await page.waitForTimeout(1000);
+    const alturaTotal = await page.evaluate(() => document.body.scrollHeight);
+    for (let y = 0; y < alturaTotal; y += 500) {
+      await page.evaluate(pos => window.scrollTo(0, pos), y);
+      await page.waitForTimeout(200);
     }
     await page.waitForTimeout(2000);
 
-    // ── EXTRAER TODOS LOS HOTELES ──
-    console.log('🔄 Extrayendo datos de todos los hoteles...');
-    
+    // ── EXTRACCIÓN ROBUSTA ──
+    console.log('🔄 Extrayendo hoteles...');
+
     const hoteles = await page.evaluate(() => {
       const results = [];
-      const nombresVistos = new Set();
+      const seenNames = new Set();
 
-      // Estrategia 1: selectores específicos del portal
-      const selectorsPrioridad = [
-        '.result-wrapper__hotel-card',
-        '[class*="hotel-card"]',
-        '[class*="HotelCard"]',
-        '[class*="PropertyCard"]',
-        '[class*="property-card"]',
-        '[class*="SearchResult"]',
-        '[class*="search-result-item"]',
-        '[class*="result-item"]',
-        '.ant-card-bordered',
-      ];
+      // El portal lista los hoteles uno tras otro
+      // Buscar TODOS los elementos que tengan:
+      // 1. Una imagen real de hotel
+      // 2. Un nombre (h2/h3/h4 o strong)
+      // 3. Un precio US$
 
-      let cards = [];
-      for (const sel of selectorsPrioridad) {
-        const found = document.querySelectorAll(sel);
-        if (found.length >= 3) {
-          cards = Array.from(found);
-          console.log(`Usando selector: ${sel}, encontrados: ${found.length}`);
-          break;
-        }
+      // Obtener todos los contenedores candidatos
+      const allEls = Array.from(document.querySelectorAll('*'));
+      
+      // Encontrar elementos con precio que también tengan imagen
+      const candidates = [];
+      
+      for (const el of allEls) {
+        const txt = el.innerText || '';
+        const hasPrice = txt.match(/US\$\s*[\d]+/);
+        if (!hasPrice) continue;
+        
+        // Verificar que tenga imagen de hotel
+        const img = el.querySelector('img');
+        if (!img) continue;
+        
+        const imgSrc = img.src || '';
+        if (!imgSrc.includes('travelapi') && !imgSrc.includes('expedia') && 
+            !imgSrc.includes('hotel') && !imgSrc.match(/\.(jpg|jpeg|png|webp)/i)) continue;
+        
+        // Verificar que tenga nombre
+        const nameEl = el.querySelector('h1,h2,h3,h4,strong');
+        if (!nameEl) continue;
+        
+        const nombre = nameEl.textContent.trim();
+        if (nombre.length < 4 || nombre.length > 150) continue;
+        
+        // Evitar contenedores padre/hijo duplicados
+        const isChild = candidates.some(c => c.el.contains(el) || el.contains(c.el));
+        if (!isChild) candidates.push({ el, nombre });
       }
 
-      // Estrategia 2: buscar por estructura (tiene imagen + precio)
-      if (cards.length < 3) {
-        const todos = document.querySelectorAll('div, article, li');
-        for (const el of todos) {
-          const tieneImg = el.querySelector('img[src*="travelapi"], img[src*="membergetaways"], img[src*="hotel"], img[src*="expedia"]');
-          const tieneNombre = el.querySelector('h1,h2,h3,h4');
-          const tienePrecio = el.innerText?.match(/US\$\s*[\d,]+/);
-          if (tieneImg && tieneNombre && tienePrecio) {
-            // Evitar duplicados por contenedor padre/hijo
-            const yaEsHijo = cards.some(c => c.contains(el) || el.contains(c));
-            if (!yaEsHijo) cards.push(el);
-          }
-        }
-        console.log(`Estrategia 2: ${cards.length} cards`);
-      }
+      console.log(`Candidatos encontrados: ${candidates.length}`);
 
-      // Procesar cada card
-      for (const card of cards) {
+      for (const { el, nombre } of candidates) {
         try {
-          // Nombre - evitar "Refundable" y textos de filtros
-          let nombre = '';
-          const posiblesNombres = card.querySelectorAll('h1,h2,h3,h4,strong,[class*="name"],[class*="title"],[class*="hotel-name"]');
-          for (const el of posiblesNombres) {
-            const txt = el.textContent.trim();
-            if (txt.length > 4 && txt.length < 120 && 
-                !txt.match(/^(refundable|non-refundable|save|from|per night|star rating|\d+ star|vacation rental|hotels|all|select|compare|view map|miles)/i)) {
-              nombre = txt;
-              break;
-            }
-          }
-          
-          if (!nombre || nombre.length < 4) continue;
-          if (nombresVistos.has(nombre)) continue; // Skip duplicados
-          nombresVistos.add(nombre);
+          // Evitar nombres genéricos
+          if (nombre.match(/^(refundable|hotel|all|vacation|rental|save|from|budget|star|select|compare|view|more|show|filter|sort|back)/i)) continue;
+          if (seenNames.has(nombre.toLowerCase())) continue;
+          seenNames.add(nombre.toLowerCase());
 
-          // Imagen - buscar la mejor imagen disponible
+          const txt = el.innerText || '';
+
+          // Precio: buscar el más bajo (From US$ XX)
+          const precios = txt.match(/US\$\s*[\d,]+\.?\d*/gi) || [];
+          const precioNums = precios.map(p => parseFloat(p.replace(/US\$\s*/i,'').replace(',','')));
+          const precioMin = precioNums.length ? Math.min(...precioNums) : 0;
+          const precio = precioMin ? `US$ ${precioMin}` : '';
+
+          // Imagen
           let imagen = '';
-          const imgs = card.querySelectorAll('img');
+          const imgs = el.querySelectorAll('img');
           for (const img of imgs) {
-            const src = img.src || img.dataset.src || img.dataset.lazySrc || '';
-            if (src && src.startsWith('http') && 
+            const src = img.src || img.dataset.src || '';
+            if (src && src.length > 10 && 
                 !src.includes('icon') && !src.includes('logo') && 
-                !src.includes('flag') && !src.includes('arrow') &&
-                !src.includes('svg') && (src.includes('travelapi') || src.includes('hotel') || 
-                src.includes('membergetaways') || src.includes('expedia') || 
-                src.includes('i.travelapi') || src.match(/\.(jpg|jpeg|png|webp)/i))) {
+                !src.includes('flag') && !src.includes('chain') &&
+                !src.includes('amenity') &&
+                (src.includes('travelapi') || src.includes('expedia') || src.match(/\.(jpg|jpeg|png|webp)/i))) {
               imagen = src;
               break;
             }
           }
-          
-          // Si no tiene imagen propia, buscar srcset
-          if (!imagen) {
-            const imgs2 = card.querySelectorAll('img[srcset], img[data-src]');
-            for (const img of imgs2) {
-              const src = img.dataset.src || img.srcset?.split(' ')[0] || '';
-              if (src && src.startsWith('http')) { imagen = src; break; }
-            }
-          }
 
-          // Precio
-          const textoCard = card.innerText || '';
-          const precioMatch = textoCard.match(/US\$\s*[\d,]+\.?\d*|From\s+US\$\s*[\d,]+/i);
-          const precio = precioMatch ? precioMatch[0] : '';
+          // Rating
+          const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
+          const rating = ratingM ? ratingM[1] : '';
 
-          // Rating / estrellas
-          const ratingEl = card.querySelector('[class*="rating"],[class*="review"],[class*="score"]');
-          const ratingTxt = ratingEl?.textContent?.trim() || '';
-          const ratingNum = ratingTxt.match(/[\d.]+/)?.[0] || '';
-
-          // Número de reviews
-          const reviewsMatch = textoCard.match(/\(?([\d,]+)\s*reviews?\)?/i);
-          const reviews = reviewsMatch ? reviewsMatch[1] : '';
-
-          // Estrellas
-          const starEl = card.querySelector('[class*="star"],[class*="Star"]');
-          const starTxt = starEl?.textContent?.trim() || '';
-          const estrellas = starTxt.match(/\d/)?.[0] || '';
+          // Reviews
+          const reviewM = txt.match(/\(?([\d,]+)\s*reviews?\)?/i);
+          const reviews = reviewM ? reviewM[1] : '';
 
           // Ahorro
-          const saveMatch = textoCard.match(/save\s*\d+%/i);
-          const ahorro = saveMatch ? saveMatch[0] : '';
+          const saveM = txt.match(/save\s*(\d+)%/i);
+          const ahorro = saveM ? `Save ${saveM[1]}%` : '';
 
-          // Dirección
-          const addrEl = card.querySelector('[class*="address"],[class*="location"],[class*="distance"],[class*="miles"]');
-          const direccion = (addrEl?.textContent?.trim() || '').substring(0, 100);
+          // Estrellas
+          const starM = txt.match(/(\d)\s*star/i);
+          const estrellas = starM ? starM[1] : '';
+
+          // Dirección/distancia
+          const distM = txt.match(/([\d.]+\s*miles?\s*from\s*\w+)/i);
+          const addrEl = el.querySelector('[class*="address"],[class*="location"]');
+          const direccion = addrEl?.textContent?.trim() || distM?.[0] || '';
 
           // Enlace
-          const linkEl = card.querySelector('a[href*="hotel"], a[href*="property"], a[href*="membergetaways"], button[class*="select"]');
-          const enlace = linkEl?.href || '';
+          const link = el.querySelector('a')?.href || '';
 
-          // Precio público (tachado)
-          const precioPublicoMatch = textoCard.match(/US\$\s*([\d,]+\.?\d*)\s*\n.*?per night/i);
-          const precioPublico = precioPublicoMatch ? `US$ ${precioPublicoMatch[1]}` : '';
-
-          results.push({
-            nombre, imagen, precio, estrellas, ratingNum,
-            reviews, ahorro, direccion, enlace, precioPublico
-          });
-        } catch(e) { /* skip */ }
+          results.push({ nombre, precio, imagen, rating, reviews, ahorro, estrellas, direccion, enlace: link });
+        } catch(e) {}
       }
 
       return results;
     });
 
-    console.log(`📦 Hoteles extraídos: ${hoteles.length}`);
+    console.log(`✅ Hoteles extraídos: ${hoteles.length}`);
 
-    // URL de resultados para el enlace
-    const urlResultados = page.url();
+    // Filtrar los que realmente tengan nombre válido
+    const final = hoteles.filter(h => 
+      h.nombre && h.nombre.length > 3 &&
+      !h.nombre.match(/^(refundable|non-refundable|\d+ miles|view map|select room|compare|internet rate|priceline|public savings)/i)
+    );
+
+    console.log(`✅ Después de filtrar: ${final.length}`);
     
     await browser.close();
 
-    // Si hay muy pocos hoteles, Claude intenta interpretar la página
-    let hotelesTotales = hoteles.length;
-    
-    // Limpiar: remover hoteles sin nombre o con nombres genéricos
-    const hotelsFiltrados = hoteles.filter(h => 
-      h.nombre && 
-      h.nombre.length > 4 && 
-      !h.nombre.match(/^(refundable|hotel|property|vacation|rental|all|more|select|view|compare|star|rating|save|from|budget|amenities)/i)
-    );
-
-    console.log(`✅ Hoteles después de filtrar: ${hotelsFiltrados.length}`);
-
-    res.json({ 
-      ok: true, 
-      destino, 
-      total: hotelsFiltrados.length,
-      hoteles: hotelsFiltrados,
-      urlResultados
+    res.json({
+      ok: true,
+      destino: ciudadCorta,
+      destinoCompleto: destino,
+      total: final.length,
+      totalPortal: totalEnPagina,
+      hoteles: final
     });
 
   } catch (error) {
@@ -334,4 +287,4 @@ app.post('/buscar-hoteles', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 Agente v11 en puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 Agente v12 puerto ${PORT}`));
