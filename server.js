@@ -72,8 +72,6 @@ app.post('/buscar-hoteles', async (req, res) => {
 
     // ── PASO 3: Llenar destino con selector correcto de Ant Design ──
     console.log('📍 Escribiendo destino:', destino);
-    
-    // El campo real es .ant-select-selection-search-input (Ant Design)
     const inputSelector = '.ant-select-selection-search-input';
     await page.waitForSelector(inputSelector, { timeout: 10000 });
     await page.click(inputSelector);
@@ -83,38 +81,34 @@ app.post('/buscar-hoteles', async (req, res) => {
 
     // Seleccionar primera sugerencia del dropdown de Ant Design
     try {
-      // Ant Design usa .ant-select-item-option
       const sugerenciaSelector = '.ant-select-item-option, .ant-select-dropdown .ant-select-item';
       await page.waitForSelector(sugerenciaSelector, { timeout: 5000 });
       await page.click(sugerenciaSelector);
       console.log('✅ Sugerencia seleccionada');
     } catch {
-      console.log('⚠️ Sin sugerencia autocomplete, presionando Enter');
-      await page.keyboard.press('Enter');
+      console.log('⚠️ Sin sugerencia, presionando Escape y Enter');
+      await page.keyboard.press('Escape');
     }
     await page.waitForTimeout(1000);
 
     // ── PASO 4: Seleccionar fechas ──
     if (checkin && checkout) {
       try {
-        // Abrir el date picker
         await page.click('.date-picker__wrapper');
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(1500);
 
-        // Calcular y hacer clic en el día de check-in
-        const [year, month, day] = checkin.split('-').map(Number);
+        const [, , dayIn] = checkin.split('-').map(Number);
         const daySelector = `.rdrDay:not(.rdrDayDisabled):not(.rdrDayPassive) .rdrDayNumber span`;
         const days = await page.$$(daySelector);
         for (const d of days) {
           const text = await d.textContent();
-          if (parseInt(text) === day) {
+          if (parseInt(text) === dayIn) {
             await d.click();
             break;
           }
         }
         await page.waitForTimeout(500);
 
-        // Clic en checkout
         const [, , dayOut] = checkout.split('-').map(Number);
         const daysOut = await page.$$(daySelector);
         for (const d of daysOut) {
@@ -125,17 +119,27 @@ app.post('/buscar-hoteles', async (req, res) => {
           }
         }
 
-        // Confirmar fechas
         await page.click('button:has-text("Done")');
         await page.waitForTimeout(500);
+        console.log('✅ Fechas seleccionadas');
       } catch (e) {
         console.log('⚠️ No se pudieron seleccionar fechas:', e.message);
       }
     }
 
-    // ── PASO 5: Buscar ──
-    console.log('🔍 Presionando Find your hotel...');
-    await page.click('.search-button');
+    // ── PASO 5: Cerrar cualquier dropdown y buscar ──
+    console.log('🔍 Cerrando dropdowns y buscando...');
+    
+    // Cerrar cualquier dropdown abierto
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(500);
+    
+    // Usar JavaScript directo para hacer clic (evita el bloqueo del dropdown)
+    await page.evaluate(() => {
+      const btn = document.querySelector('.search-button');
+      if (btn) btn.click();
+    });
+    
     await page.waitForTimeout(10000);
     console.log('📊 URL resultados:', page.url());
 
@@ -143,7 +147,6 @@ app.post('/buscar-hoteles', async (req, res) => {
     const hoteles = await page.evaluate(() => {
       const results = [];
 
-      // Selectores específicos de membergetaways (React app)
       const selectores = [
         '[class*="hotel-card"]', '[class*="hotelCard"]',
         '[class*="HotelCard"]', '[class*="PropertyCard"]',
@@ -161,7 +164,6 @@ app.post('/buscar-hoteles', async (req, res) => {
         }
       }
 
-      // Fallback: buscar por estructura
       if (cards.length === 0) {
         document.querySelectorAll('article, [class*="card"]').forEach(el => {
           const tieneNombre = el.querySelector('h2, h3, h4, [class*="name"], [class*="title"]');
@@ -186,7 +188,6 @@ app.post('/buscar-hoteles', async (req, res) => {
       return results;
     });
 
-    // Debug si no encontró
     let debug = null;
     if (hoteles.length === 0) {
       debug = await page.evaluate(() => ({
