@@ -64,7 +64,7 @@ app.post('/buscar-hoteles', async (req, res) => {
     // ── PASO 2: Ir al buscador ──
     console.log('🏨 Abriendo buscador...');
     await page.goto('https://portal.membergetaways.com/rsi/search', {
-      waitUntil: 'networkidle', timeout: 30000
+      waitUntil: 'domcontentloaded', timeout: 30000
     });
     await page.waitForTimeout(3000);
 
