@@ -62,53 +62,94 @@ app.post('/buscar-hoteles', async (req, res) => {
     await page.waitForTimeout(8000);
     console.log('✅ Login OK. URL:', page.url());
 
-    // ── PASO 2: Ir a buscador de hoteles ──
+    // ── PASO 2: Ir a buscador ──
     console.log('🏨 Abriendo buscador...');
     await page.goto('https://portal.membergetaways.com/rsi/search', {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'networkidle',
       timeout: 30000
     });
     await page.waitForTimeout(3000);
 
-    // ── PASO 3: Llenar destino ──
+    // ── PASO 3: Llenar destino con selector correcto de Ant Design ──
     console.log('📍 Escribiendo destino:', destino);
-    const inputSelector = 'input[placeholder="Where are you going?"]';
+    
+    // El campo real es .ant-select-selection-search-input (Ant Design)
+    const inputSelector = '.ant-select-selection-search-input';
     await page.waitForSelector(inputSelector, { timeout: 10000 });
     await page.click(inputSelector);
-    await page.waitForTimeout(300);
-    await page.type(inputSelector, destino, { delay: 120 });
+    await page.waitForTimeout(500);
+    await page.type(inputSelector, destino, { delay: 150 });
     await page.waitForTimeout(3000);
 
-    // Seleccionar primera sugerencia del autocomplete
+    // Seleccionar primera sugerencia del dropdown de Ant Design
     try {
-      const sugerencia = 'li[class*="suggestion"], li[class*="autocomplete"], [role="option"], .pac-item';
-      await page.waitForSelector(sugerencia, { timeout: 4000 });
-      await page.click(sugerencia);
+      // Ant Design usa .ant-select-item-option
+      const sugerenciaSelector = '.ant-select-item-option, .ant-select-dropdown .ant-select-item';
+      await page.waitForSelector(sugerenciaSelector, { timeout: 5000 });
+      await page.click(sugerenciaSelector);
       console.log('✅ Sugerencia seleccionada');
     } catch {
-      console.log('⚠️ Sin sugerencia, usando Enter');
-      await page.keyboard.press('ArrowDown');
+      console.log('⚠️ Sin sugerencia autocomplete, presionando Enter');
       await page.keyboard.press('Enter');
     }
     await page.waitForTimeout(1000);
 
-    // ── PASO 4: Buscar ──
-    console.log('🔍 Presionando buscar...');
+    // ── PASO 4: Seleccionar fechas ──
+    if (checkin && checkout) {
+      try {
+        // Abrir el date picker
+        await page.click('.date-picker__wrapper');
+        await page.waitForTimeout(1000);
+
+        // Calcular y hacer clic en el día de check-in
+        const [year, month, day] = checkin.split('-').map(Number);
+        const daySelector = `.rdrDay:not(.rdrDayDisabled):not(.rdrDayPassive) .rdrDayNumber span`;
+        const days = await page.$$(daySelector);
+        for (const d of days) {
+          const text = await d.textContent();
+          if (parseInt(text) === day) {
+            await d.click();
+            break;
+          }
+        }
+        await page.waitForTimeout(500);
+
+        // Clic en checkout
+        const [, , dayOut] = checkout.split('-').map(Number);
+        const daysOut = await page.$$(daySelector);
+        for (const d of daysOut) {
+          const text = await d.textContent();
+          if (parseInt(text) === dayOut) {
+            await d.click();
+            break;
+          }
+        }
+
+        // Confirmar fechas
+        await page.click('button:has-text("Done")');
+        await page.waitForTimeout(500);
+      } catch (e) {
+        console.log('⚠️ No se pudieron seleccionar fechas:', e.message);
+      }
+    }
+
+    // ── PASO 5: Buscar ──
+    console.log('🔍 Presionando Find your hotel...');
     await page.click('button:has-text("Find your hotel")');
-    await page.waitForTimeout(8000);
+    await page.waitForTimeout(10000);
     console.log('📊 URL resultados:', page.url());
 
-    // ── PASO 5: Extraer hoteles ──
+    // ── PASO 6: Extraer hoteles ──
     const hoteles = await page.evaluate(() => {
       const results = [];
 
-      // Buscar contenedores de hoteles
+      // Selectores específicos de membergetaways (React app)
       const selectores = [
-        '[class*="HotelCard"]', '[class*="hotelCard"]',
-        '[class*="PropertyCard"]', '[class*="property-card"]',
-        '[class*="hotel-card"]', '[class*="SearchResult"]',
-        '[class*="ResultCard"]', '[class*="resultCard"]',
-        '.hotel-item', '[data-testid*="hotel"]'
+        '[class*="hotel-card"]', '[class*="hotelCard"]',
+        '[class*="HotelCard"]', '[class*="PropertyCard"]',
+        '[class*="property-card"]', '[class*="result-card"]',
+        '[class*="ResultCard"]', '[class*="hotel-item"]',
+        '[class*="search-result"]', '[class*="SearchResult"]'
       ];
 
       let cards = [];
@@ -120,9 +161,9 @@ app.post('/buscar-hoteles', async (req, res) => {
         }
       }
 
-      // Si no encontró con selectores específicos, buscar por estructura
+      // Fallback: buscar por estructura
       if (cards.length === 0) {
-        document.querySelectorAll('article, [class*="card"], [class*="result"]').forEach(el => {
+        document.querySelectorAll('article, [class*="card"]').forEach(el => {
           const tieneNombre = el.querySelector('h2, h3, h4, [class*="name"], [class*="title"]');
           const tienePrecio = el.querySelector('[class*="price"], [class*="rate"]');
           if (tieneNombre && tienePrecio) cards.push(el);
@@ -131,10 +172,10 @@ app.post('/buscar-hoteles', async (req, res) => {
 
       cards.slice(0, 15).forEach(card => {
         const nombre = card.querySelector('h1,h2,h3,h4,[class*="name"],[class*="title"]')?.textContent?.trim();
-        const precio = card.querySelector('[class*="price"],[class*="rate"],[class*="cost"],[class*="amount"]')?.textContent?.trim();
+        const precio = card.querySelector('[class*="price"],[class*="rate"],[class*="amount"],[class*="cost"]')?.textContent?.trim();
         const imagen = card.querySelector('img[src*="http"]')?.src;
         const estrellas = card.querySelector('[class*="star"],[class*="rating"]')?.textContent?.trim();
-        const descripcion = card.querySelector('p,[class*="desc"],[class*="address"],[class*="location"]')?.textContent?.trim()?.substring(0, 150);
+        const descripcion = card.querySelector('p,[class*="desc"],[class*="address"]')?.textContent?.trim()?.substring(0, 150);
         const enlace = card.querySelector('a')?.href;
 
         if (nombre && nombre.length > 3) {
@@ -145,7 +186,7 @@ app.post('/buscar-hoteles', async (req, res) => {
       return results;
     });
 
-    // Debug si no encontró hoteles
+    // Debug si no encontró
     let debug = null;
     if (hoteles.length === 0) {
       debug = await page.evaluate(() => ({
@@ -153,7 +194,8 @@ app.post('/buscar-hoteles', async (req, res) => {
         titulo: document.title,
         texto: document.body.innerText.substring(0, 800)
       }));
-      console.log('Debug:', JSON.stringify(debug).substring(0, 400));
+      console.log('Debug URL:', debug.url);
+      console.log('Debug texto:', debug.texto.substring(0, 300));
     }
 
     await browser.close();
