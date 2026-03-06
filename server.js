@@ -48,7 +48,7 @@ app.get('/stream-hoteles', async (req, res) => {
     await page.evaluate(() => { const m = document.getElementById('myModal'); if (m) m.style.display = 'flex'; });
     await page.waitForTimeout(1000);
     await page.fill('#myModal input[name="username"]', 'orothomas');
-    await page.fill('#myModal input[type="password"]', 'orovazquez');
+    await page.fill('#myModal input[type="password"]', 'OroHC213&');
     await page.click('#myModal button:has-text("Log in")');
     await page.waitForTimeout(8000);
     emit('status', { msg: 'Sesión OK. Abriendo buscador...' });
