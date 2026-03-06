@@ -5,7 +5,21 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 13 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 15 }));
+
+// ── Imágenes genéricas a bloquear ──
+const BAD_IMG_PATTERNS = [
+  'package-DSIKBsRR', 'rsi/assets', 'placeholder', 'no-image',
+  'noimage', 'default.jpg', 'blank.', 'logo', 'icon-', 'amenity',
+  'chain-logo', 'flag'
+];
+function isGoodImg(src) {
+  if (!src || src.length < 10) return false;
+  const lower = src.toLowerCase();
+  if (BAD_IMG_PATTERNS.some(p => lower.includes(p))) return false;
+  if (!lower.match(/\.(jpg|jpeg|png|webp)/i) && !lower.includes('travelapi') && !lower.includes('expedia') && !lower.includes('media')) return false;
+  return true;
+}
 
 // ── SSE STREAMING ──
 app.get('/stream-hoteles', async (req, res) => {
@@ -13,7 +27,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 STREAM: "${ciudad}"`);
+  console.log(`🚀 v15 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -25,14 +39,15 @@ app.get('/stream-hoteles', async (req, res) => {
     try { res.write(`data: ${JSON.stringify({ tipo, ...data })}\n\n`); } catch(e) {}
   };
 
-  emit('status', { msg: `Conectando al portal para ${ciudad}...` });
+  emit('status', { msg: `Conectando al portal de Son Terra Club...` });
 
   let browser;
   try {
     const { chromium } = require('playwright');
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote']
+      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
+             '--disable-gpu','--single-process','--no-zygote']
     });
 
     const ctx = await browser.newContext({
@@ -41,7 +56,7 @@ app.get('/stream-hoteles', async (req, res) => {
     });
     const page = await ctx.newPage();
 
-    // LOGIN
+    // ── LOGIN ──
     emit('status', { msg: 'Iniciando sesión...' });
     await page.goto('https://login.orohorizonsclub.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
@@ -51,13 +66,14 @@ app.get('/stream-hoteles', async (req, res) => {
     await page.fill('#myModal input[type="password"]', 'OroHC213&');
     await page.click('#myModal button:has-text("Log in")');
     await page.waitForTimeout(8000);
-    emit('status', { msg: 'Sesión OK. Abriendo buscador...' });
+    console.log('✅ Login OK:', page.url());
+    emit('status', { msg: 'Sesión activa. Buscando hoteles en ' + ciudad + '...' });
 
-    // BUSCADOR
+    // ── BUSCADOR ──
     await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(4000);
 
-    // DESTINO
+    // ── DESTINO ──
     await page.waitForSelector('.ant-select-selection-search-input', { timeout: 10000 });
     await page.click('.ant-select-selection-search-input');
     await page.waitForTimeout(500);
@@ -67,7 +83,7 @@ app.get('/stream-hoteles', async (req, res) => {
     try {
       await page.waitForSelector('.ant-select-item-option', { timeout: 5000 });
       const opts = await page.$$('.ant-select-item-option');
-      if (opts.length > 0) { await opts[0].click(); console.log('✅ Sugerencia OK'); }
+      if (opts.length > 0) { await opts[0].click(); }
     } catch {
       await page.keyboard.press('ArrowDown');
       await page.waitForTimeout(200);
@@ -75,7 +91,7 @@ app.get('/stream-hoteles', async (req, res) => {
     }
     await page.waitForTimeout(1500);
 
-    // FECHAS
+    // ── FECHAS ──
     if (checkin && checkout) {
       try {
         await page.click('.date-picker__wrapper');
@@ -92,10 +108,10 @@ app.get('/stream-hoteles', async (req, res) => {
         }
         try { await page.click('button:has-text("Done")'); } catch {}
         await page.waitForTimeout(500);
-      } catch(e) { console.log('Fechas error:', e.message); }
+      } catch(e) { console.log('Fechas:', e.message); }
     }
 
-    // BUSCAR
+    // ── CLICK BUSCAR ──
     await page.keyboard.press('Escape');
     await page.waitForTimeout(500);
     await page.evaluate(() => {
@@ -103,108 +119,188 @@ app.get('/stream-hoteles', async (req, res) => {
       if (b) b.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    emit('status', { msg: 'Buscando resultados...' });
+    emit('status', { msg: `Cargando resultados para ${ciudad}...` });
     await page.waitForTimeout(12000);
-    emit('status', { msg: 'Extrayendo hoteles...' });
 
-    // FUNCIÓN EXTRACCIÓN
-    const extraer = async () => {
+    // ── SCROLL + EXTRACCIÓN ──
+    const enviados = new Set();
+    let total = 0;
+    let scrollsVacios = 0;
+
+    // Función: extraer lista de hoteles de la página de resultados
+    const extraerLista = async () => {
       return page.evaluate(() => {
         const results = [];
-        // Buscar elementos que tengan precio US$ e imagen real
-        const candidatos = new Map();
+        const visto = new Set();
         document.querySelectorAll('img').forEach(img => {
           const src = img.src || '';
-          if (!src || src.includes('icon') || src.includes('logo') || src.includes('flag') || src.includes('chain') || src.includes('amenity')) return;
-          if (!src.includes('travelapi') && !src.includes('expedia') && !src.match(/\.(jpg|jpeg|png|webp)/i)) return;
-          // Subir hasta encontrar contenedor con precio y nombre
+          if (!src || src.length < 10) return;
+          const lower = src.toLowerCase();
+          const esReal = (lower.includes('travelapi') || lower.includes('expedia') || lower.includes('media')) && lower.match(/\.(jpg|jpeg|png|webp)/i);
+          if (!esReal) return;
+
           let el = img.parentElement;
-          for (let i = 0; i < 10; i++) {
+          for (let i = 0; i < 12; i++) {
             if (!el) break;
             const txt = el.innerText || '';
-            const hasPrice = txt.match(/US\$\s*[\d]+/);
+            if (!txt.match(/US\$\s*[\d]+/)) { el = el.parentElement; continue; }
             const nameEl = el.querySelector('h2,h3,h4,strong');
-            if (hasPrice && nameEl) {
-              const nombre = nameEl.textContent.trim();
-              if (nombre.length > 4 && nombre.length < 150 &&
-                  !nombre.match(/^(refundable|non-refund|select|compare|view map|internet|priceline|public|star rating|vacation|filter|sort|back|budget|amenities)/i)) {
-                if (!candidatos.has(nombre)) {
-                  candidatos.set(nombre, { el, img: src, txt, nombre });
-                }
-              }
-              break;
-            }
-            el = el.parentElement;
+            if (!nameEl) { el = el.parentElement; continue; }
+            const nombre = nameEl.textContent.trim();
+            if (nombre.length < 4 || nombre.length > 150) { el = el.parentElement; continue; }
+            if (/^(refundable|non-refund|select|compare|view map|internet|priceline|filter|sort|star rating|amenities|save)/i.test(nombre)) { el = el.parentElement; continue; }
+            if (visto.has(nombre)) break;
+            visto.add(nombre);
+
+            const link = el.querySelector('a[href*="detail"],a[href*="hotel"],a[href*="property"],a')?.href || '';
+            const precios = (txt.match(/US\$\s*[\d,]+\.?\d*/gi) || []).map(p => parseFloat(p.replace(/US\$\s*/i, '').replace(/,/g, ''))).filter(n => n > 0);
+            const precioMin = precios.length ? Math.min(...precios) : 0;
+            const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
+            const reviewM = txt.match(/\(?([\d,]+)\s*reviews?\)?/i);
+            const saveM = txt.match(/save\s*(\d+)%/i);
+            const addrEl = el.querySelector('[class*="address"],[class*="location"]');
+            const distM = txt.match(/([\d.]+\s*miles?\s*from[^,\n]+)/i);
+
+            results.push({
+              nombre,
+              precio: precioMin ? `US$ ${Math.round(precioMin)}` : '',
+              imagen: src,
+              imagenes: [src],
+              rating: ratingM ? ratingM[1] : '',
+              reviews: reviewM ? reviewM[1] : '',
+              ahorro: saveM ? `Save ${saveM[1]}%` : '',
+              direccion: (addrEl?.textContent?.trim() || distM?.[0] || '').replace(/view map/gi,'').trim().substring(0, 150),
+              enlace: link,
+              descripcion: '',
+              fuente: 'portal'
+            });
+            break;
           }
-        });
-
-        candidatos.forEach(({ el, img: imagen, txt, nombre }) => {
-          const precios = (txt.match(/US\$\s*[\d,]+\.?\d*/gi) || [])
-            .map(p => parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
-            .filter(n => n > 0);
-          const precioMin = precios.length ? Math.min(...precios) : 0;
-          const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
-          const reviewM = txt.match(/\(?([\d,]+)\s*reviews?\)?/i);
-          const saveM = txt.match(/save\s*(\d+)%/i);
-          const addrEl = el.querySelector('[class*="address"],[class*="location"]');
-          const distM = txt.match(/([\d.]+\s*miles?\s*from[^,\n]+)/i);
-          const link = el.querySelector('a[href*="hotel"],a[href*="property"],a[href*="search"],a')?.href || '';
-
-          // Múltiples imágenes del contenedor
-          const allImgs = Array.from(el.querySelectorAll('img'))
-            .map(i => i.src || '')
-            .filter(s => s && !s.includes('icon') && !s.includes('logo') && !s.includes('flag') &&
-              !s.includes('chain') && !s.includes('amenity') &&
-              (s.includes('travelapi') || s.includes('expedia') || s.match(/\.(jpg|jpeg|png|webp)/i)));
-
-          results.push({
-            nombre,
-            precio: precioMin ? `US$ ${Math.round(precioMin)}` : '',
-            imagen: allImgs[0] || imagen,
-            imagenes: [...new Set(allImgs)].slice(0, 6),
-            rating: ratingM ? ratingM[1] : '',
-            reviews: reviewM ? reviewM[1] : '',
-            ahorro: saveM ? `Save ${saveM[1]}%` : '',
-            direccion: (addrEl?.textContent?.trim() || distM?.[0] || '').substring(0, 120),
-            enlace: link,
-            fuente: 'portal'
-          });
         });
         return results;
       });
     };
 
-    // STREAM: enviar conforme aparecen
-    const enviados = new Set();
-    let total = 0;
+    // ── FUNCIÓN: entrar al hotel y extraer fotos reales + descripción ──
+    const enrichHotel = async (hotel) => {
+      if (!hotel.enlace || !hotel.enlace.startsWith('http')) return hotel;
+      const detailPage = await ctx.newPage();
+      try {
+        await detailPage.goto(hotel.enlace, { waitUntil: 'domcontentloaded', timeout: 18000 });
+        await detailPage.waitForTimeout(3000);
 
-    const enviarNuevos = async () => {
-      const hoteles = await extraer();
-      let nuevos = 0;
-      for (const h of hoteles) {
-        const key = h.nombre.toLowerCase().trim();
-        if (!enviados.has(key)) {
-          enviados.add(key);
-          emit('hotel', { hotel: h });
-          total++;
-          nuevos++;
+        const data = await detailPage.evaluate(() => {
+          const fotos = [];
+          const vistasImg = new Set();
+
+          // Buscar todas las imágenes reales del hotel
+          const allImgs = Array.from(document.querySelectorAll('img'));
+          for (const img of allImgs) {
+            const src = img.src || img.dataset.src || img.getAttribute('data-lazy') || '';
+            if (!src || src.length < 10) continue;
+            const lower = src.toLowerCase();
+            if (!lower.includes('travelapi') && !lower.includes('expedia') && !lower.includes('media') && !lower.match(/\.(jpg|jpeg|png|webp)/i)) continue;
+            if (['logo','icon-','amenity','chain','flag','placeholder','noimage','package-D'].some(p => lower.includes(p))) continue;
+            if (vistasImg.has(src)) continue;
+            // Preferir imágenes grandes
+            const w = img.naturalWidth || img.width || 0;
+            const h = img.naturalHeight || img.height || 0;
+            if (w > 0 && w < 100) continue; // muy pequeña
+            vistasImg.add(src);
+            fotos.push(src);
+            if (fotos.length >= 8) break;
+          }
+
+          // Si hay srcset, también extraer de ahí
+          document.querySelectorAll('img[srcset],source[srcset]').forEach(el => {
+            const srcset = el.srcset || '';
+            const srcs = srcset.split(',').map(s => s.trim().split(' ')[0]).filter(s => s && s.startsWith('http'));
+            for (const src of srcs) {
+              const lower = src.toLowerCase();
+              if ((lower.includes('travelapi') || lower.includes('expedia') || lower.includes('media')) && lower.match(/\.(jpg|jpeg|png|webp)/i)) {
+                if (!vistasImg.has(src)) { vistasImg.add(src); fotos.push(src); }
+              }
+            }
+          });
+
+          // Descripción: buscar párrafos descriptivos
+          let descripcion = '';
+          const posibleDesc = [
+            '[class*="description"]', '[class*="about"]', '[class*="overview"]',
+            '[class*="detail"]>p', '[class*="content"]>p', 'article p', '.property-description',
+            '[data-testid*="description"]'
+          ];
+          for (const sel of posibleDesc) {
+            const els = Array.from(document.querySelectorAll(sel));
+            for (const el of els) {
+              const txt = (el.innerText || el.textContent || '').trim();
+              if (txt.length > 80 && txt.length < 2000 && !txt.match(/^\d/) && !txt.includes('$')) {
+                descripcion = txt.substring(0, 600);
+                break;
+              }
+            }
+            if (descripcion) break;
+          }
+
+          // Nombre del hotel en la página de detalle (para confirmar)
+          const nombreEl = document.querySelector('h1,h2');
+          const nombreDetalle = nombreEl ? nombreEl.textContent.trim() : '';
+
+          // Dirección más completa
+          const addrEl = document.querySelector('[class*="address"],[class*="location"],[itemprop="address"]');
+          const direccionDetalle = addrEl ? addrEl.textContent.trim().replace(/view map/gi,'').trim() : '';
+
+          return { fotos, descripcion, nombreDetalle, direccionDetalle };
+        });
+
+        const fotosReales = data.fotos.filter(s => isGoodImg(s));
+        if (fotosReales.length > 0) {
+          hotel.imagen = fotosReales[0];
+          hotel.imagenes = fotosReales;
         }
+        if (data.descripcion) hotel.descripcion = data.descripcion;
+        if (data.direccionDetalle && data.direccionDetalle.length > hotel.direccion.length) {
+          hotel.direccion = data.direccionDetalle.substring(0, 150);
+        }
+        console.log(`  📸 ${hotel.nombre}: ${fotosReales.length} fotos, desc: ${data.descripcion.length} chars`);
+      } catch(e) {
+        console.log(`  ⚠️ Detail error ${hotel.nombre}: ${e.message.substring(0,60)}`);
+      } finally {
+        await detailPage.close().catch(() => {});
       }
-      return nuevos;
+      return hotel;
     };
 
-    // Primera tanda
-    await enviarNuevos();
-    emit('status', { msg: `${total} hoteles encontrados. Cargando más...` });
+    // ── SCROLL Y PROCESO ──
+    for (let round = 0; round < 25; round++) {
+      const lista = await extraerLista();
+      const nuevos = lista.filter(h => !enviados.has(h.nombre.toLowerCase()));
 
-    // Scroll continuo
-    let vacios = 0;
-    for (let r = 0; r < 25; r++) {
+      if (nuevos.length === 0) {
+        scrollsVacios++;
+        if (scrollsVacios >= 3) break;
+      } else {
+        scrollsVacios = 0;
+        // Enriquecer con fotos/descripción en paralelo (máx 3 a la vez)
+        const chunks = [];
+        for (let i = 0; i < nuevos.length; i += 3) chunks.push(nuevos.slice(i, i + 3));
+
+        for (const chunk of chunks) {
+          const enriquecidos = await Promise.all(chunk.map(h => enrichHotel(h)));
+          for (const h of enriquecidos) {
+            const key = h.nombre.toLowerCase();
+            if (!enviados.has(key)) {
+              enviados.add(key);
+              emit('hotel', { hotel: h });
+              total++;
+            }
+          }
+          emit('status', { msg: `${total} hoteles encontrados en ${ciudad}...` });
+        }
+      }
+
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForTimeout(2800);
-      const nuevos = await enviarNuevos();
-      if (nuevos === 0) { vacios++; if (vacios >= 3) break; }
-      else { vacios = 0; emit('status', { msg: `${total} hoteles encontrados...` }); }
     }
 
     await browser.close();
@@ -221,4 +317,4 @@ app.get('/stream-hoteles', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v13 SSE puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v15 puerto ${PORT}`));
