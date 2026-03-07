@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 19 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 20 }));
 
 // ── Imágenes genéricas a bloquear ──
 const BAD_IMG_PATTERNS = [
@@ -55,7 +55,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v19 STREAM: "${ciudad}"`);
+  console.log(`🚀 v20 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -322,7 +322,7 @@ app.get('/stream-hoteles', async (req, res) => {
               reviews: reviewM ? reviewM[1] : '',
               ahorro: saveM ? `Save ${saveM[1]}%` : '',
               direccion: (addrEl?.textContent?.trim() || distM?.[0] || '').replace(/view map/gi,'').trim().substring(0, 150),
-              enlace: link,
+              enlace: link || window.location.href,
               descripcion: '',
               fuente: 'portal'
             });
@@ -403,13 +403,12 @@ app.get('/stream-hoteles', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════
-// ENDPOINT: /hotel-detail
-// Estrategia: buscar el hotel por nombre en el portal,
-// hacer clic en "Select room" y scrapeear la página resultante
+// ENDPOINT: /hotel-detail v19
+// Navega a la búsqueda, hace clic en Select room del
+// hotel por nombre, espera 8s y extrae todo
 // ══════════════════════════════════════════════════════
 app.get('/hotel-detail', async (req, res) => {
-  const { enlace, checkin, checkout, nombre: nombreParam } = req.query;
-  if (!enlace && !nombreParam) { res.status(400).json({ error: 'no enlace ni nombre' }); return; }
+  const { enlace, checkin, checkout, nombre: nombreParam, destino } = req.query;
 
   let noches = 1;
   if (checkin && checkout) {
@@ -436,135 +435,199 @@ app.get('/hotel-detail', async (req, res) => {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
     });
 
-    emit('status', { msg: 'Iniciando sesión en el portal...' });
+    emit('status', { msg: 'Iniciando sesión...' });
     await doLogin(ctx);
-    emit('status', { msg: 'Buscando el hotel en el portal...' });
 
     const page = await ctx.newPage();
 
-    // ── Estrategia A: si tenemos enlace directo con ID (/rsi/hotel/ID), usarlo ──
-    let detailUrl = null;
-    if (enlace && enlace.includes('/rsi/hotel/') && enlace.match(/\/rsi\/hotel\/\d+/)) {
-      detailUrl = enlace;
-      console.log('✅ Enlace directo:', detailUrl);
+    // ── Navegar a la búsqueda con las fechas y destino ──
+    // El enlace que viene del stream ES el URL del buscador con params
+    const searchUrl = (enlace && enlace.includes('membergetaways')) ? enlace
+      : 'https://portal.membergetaways.com/rsi/search';
+
+    emit('status', { msg: 'Buscando el hotel...' });
+    console.log('🔍 Navegando a:', searchUrl.substring(0, 80));
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+    await page.waitForTimeout(5000);
+
+    // Si llegamos a la página de búsqueda vacía, hacer la búsqueda con destino
+    if (page.url().includes('/rsi/search') && destino) {
+      try {
+        await page.waitForSelector('.ant-select-selection-search-input', { timeout: 10000 });
+        await page.click('.ant-select-selection-search-input');
+        await page.waitForTimeout(400);
+        await page.type('.ant-select-selection-search-input', destino.split(',')[0].trim(), { delay: 150 });
+        await page.waitForTimeout(3000);
+        const opts = await page.$$('.ant-select-item-option');
+        if (opts.length > 0) await opts[0].click();
+        else await page.keyboard.press('Enter');
+        await page.waitForTimeout(1000);
+        await page.evaluate(() => {
+          const b = document.querySelector('.search-button');
+          if (b) b.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+        await page.waitForTimeout(10000);
+        console.log('✅ Búsqueda ejecutada para:', destino);
+      } catch(e) {
+        console.log('⚠️ Búsqueda fallida:', e.message.substring(0,60));
+      }
     }
 
-    // ── Estrategia B: buscar por nombre + hacer clic en Select room ──
-    if (!detailUrl) {
-      // Construir URL de búsqueda con los mismos parámetros que usó el stream
-      const destino = req.query.destino || (enlace ? '' : '');
-      // Navegar a la búsqueda del portal
-      let searchUrl = enlace || '';
+    emit('status', { msg: 'Esperando tarjetas de hotel...' });
 
-      // Si el enlace es de la página de búsqueda, ir ahí directamente
-      if (searchUrl.includes('/rsi/search') || searchUrl.includes('search')) {
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      } else {
-        // Ir a búsqueda general - el nombre del hotel viene en nombreParam
-        await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      }
-      await page.waitForTimeout(4000);
+    // Esperar que aparezcan botones Select room
+    try {
+      await page.waitForSelector('.hotel-card-wrapper__price-btn', { timeout: 20000 });
+      console.log('✅ Botones Select room visibles');
+    } catch(e) {
+      console.log('⚠️ Botones no encontrados, continuando...');
+    }
 
-      emit('status', { msg: 'Cargando resultados de búsqueda...' });
+    // Scroll para cargar todas las tarjetas
+    for (const pos of [400, 900, 1600, 0]) {
+      await page.evaluate(y => window.scrollTo(0, y), pos);
+      await page.waitForTimeout(800);
+    }
 
-      // Esperar que aparezcan las tarjetas de hotel
-      try {
-        await page.waitForSelector('.hotel-card-wrapper__price-btn, [class*="hotel-card"], [class*="price-btn"]', { timeout: 20000 });
-        await page.waitForTimeout(2000);
-      } catch(e) {
-        console.log('⚠️ Cards tardaron:', e.message.substring(0,60));
-      }
+    emit('status', { msg: `Localizando: ${nombreParam || ''}...` });
 
-      // ── Buscar la tarjeta del hotel por nombre y hacer clic en Select room ──
-      const nombre = nombreParam || '';
-      emit('status', { msg: `Localizando: ${nombre}...` });
+    // ── Hacer clic en Select room del hotel correcto ──
+    const nombre = (nombreParam || '').toLowerCase().trim();
+    console.log('🎯 Buscando hotel:', nombre);
 
-      // Scroll para cargar todas las tarjetas
-      for (const pos of [400, 900, 1600, 2400, 0]) {
-        await page.evaluate(y => window.scrollTo(0, y), pos);
-        await page.waitForTimeout(600);
-      }
+    // Contar botones disponibles
+    const nBotones = await page.$$eval('.hotel-card-wrapper__price-btn', btns => btns.length);
+    console.log(`🔘 Botones Select room: ${nBotones}`);
 
-      // Escuchar la navegación que dispara "Select room"
-      const [newPage] = await Promise.all([
-        ctx.waitForEvent('page', { timeout: 25000 }).catch(() => null),
-        page.evaluate((buscarNombre) => {
-          // Buscar tarjeta cuyo texto incluya el nombre del hotel
-          const cards = document.querySelectorAll('[class*="hotel-card"], [class*="property-card"], [class*="result-item"]');
-          for (const card of cards) {
-            const txt = (card.innerText || card.textContent || '').toLowerCase();
-            if (buscarNombre && txt.includes(buscarNombre.toLowerCase().substring(0, 15))) {
-              // Encontrar y hacer clic en "Select room"
-              const btn = card.querySelector('.hotel-card-wrapper__price-btn, [class*="price-btn"], [class*="select-room"], a[class*="btn"]');
-              if (btn) { btn.click(); return 'clicked:' + buscarNombre; }
+    // Buscar el botón del hotel correcto por nombre
+    let clickResult = await page.evaluate((buscarNombre) => {
+      const btns = document.querySelectorAll('.hotel-card-wrapper__price-btn');
+      for (const btn of btns) {
+        // Subir hasta encontrar el contenedor de la tarjeta
+        let card = btn.parentElement;
+        for (let i = 0; i < 8; i++) {
+          const txt = (card?.innerText || card?.textContent || '').toLowerCase();
+          if (txt.length > 20) {
+            if (!buscarNombre || txt.includes(buscarNombre.substring(0, 12))) {
+              btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              btn.click();
+              return { ok: true, found: true, cardText: txt.substring(0, 80) };
             }
+            break;
           }
-          // Fallback: clic en el primer "Select room" disponible
-          const firstBtn = document.querySelector('.hotel-card-wrapper__price-btn, [class*="price-btn"]');
-          if (firstBtn) { firstBtn.click(); return 'clicked:first'; }
-          return 'not-found';
-        }, nombre)
-      ]);
+          card = card?.parentElement;
+        }
+      }
+      // Fallback: clic en el primer botón
+      if (btns.length > 0) {
+        btns[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        btns[0].click();
+        return { ok: true, found: false, fallback: true };
+      }
+      return { ok: false };
+    }, nombre);
 
-      if (newPage) {
-        console.log('✅ Nueva pestaña abierta por Select room');
-        await newPage.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
-        detailUrl = newPage.url();
-        console.log('✅ URL de detalle:', detailUrl);
-        // Cerrar la página de búsqueda, trabajar en la nueva
-        await page.close();
-        // Reasignar page a la nueva
-        const det = newPage;
-        await det.waitForTimeout(4000);
-        emit('status', { msg: 'Hotel encontrado, cargando galería de fotos...' });
-        await scrapeAndEmit(det, noches, emit, isGoodImg);
-        await browser.close();
-        emit('fin', {});
-        res.end();
-        return;
+    console.log('🖱️ Click result:', JSON.stringify(clickResult));
+
+    if (!clickResult.ok) {
+      emit('error', { msg: 'No se encontró el botón Select room en la página.' });
+      await browser.close(); res.end(); return;
+    }
+
+    emit('status', { msg: 'Abriendo ficha del hotel, espera un momento...' });
+
+    // ── Esperar la navegación — puede ser nueva pestaña o SPA routing ──
+    let detPage = null;
+
+    // Caso 1: abre nueva pestaña
+    const newPagePromise = ctx.waitForEvent('page', { timeout: 10000 }).catch(() => null);
+    // Caso 2: navegación en la misma pestaña
+    const navPromise = page.waitForNavigation({ url: '**/rsi/hotel/**', timeout: 10000 }).catch(() => null);
+
+    const [newTab, nav] = await Promise.all([newPagePromise, navPromise]);
+
+    if (newTab) {
+      console.log('✅ Nueva pestaña abierta');
+      detPage = newTab;
+      await detPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+    } else if (nav || page.url().includes('/rsi/hotel/')) {
+      console.log('✅ SPA routing, misma pestaña:', page.url().substring(0, 80));
+      detPage = page;
+    } else {
+      // Esperar un poco más — a veces tarda
+      await page.waitForTimeout(5000);
+      const curUrl = page.url();
+      console.log('⏳ URL actual después de 5s:', curUrl.substring(0, 80));
+      if (curUrl.includes('/rsi/hotel/')) {
+        detPage = page;
       } else {
-        // Select room abrió en la misma pestaña (SPA routing)
-        console.log('ℹ️ Select room usó SPA routing — esperando navegación interna...');
-        await page.waitForTimeout(5000);
-        const currentUrl = page.url();
-        if (currentUrl.includes('/rsi/hotel/')) {
-          detailUrl = currentUrl;
-          console.log('✅ SPA navegó a:', detailUrl);
+        // Verificar si hay nueva pestaña tardía
+        const pages = ctx.pages();
+        for (const p of pages) {
+          if (p.url().includes('/rsi/hotel/')) { detPage = p; break; }
         }
       }
     }
 
-    // ── Ir a la URL de detalle (si la tenemos) ──
-    if (detailUrl && detailUrl.includes('/rsi/hotel/')) {
-      emit('status', { msg: 'Abriendo ficha completa del hotel...' });
-      // Reusar la misma página o abrir una nueva
-      let det;
-      if (page.url() === detailUrl || page.url().includes('/rsi/hotel/')) {
-        det = page;
-      } else {
-        det = await ctx.newPage();
-        await det.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-      }
-      await det.waitForTimeout(4000);
-      emit('status', { msg: 'Cargando fotos y amenidades...' });
-      await scrapeAndEmit(det, noches, emit, isGoodImg);
-      await browser.close();
-      emit('fin', {});
-    } else {
-      // Sin URL válida — intentar scrapeear la página actual
-      emit('status', { msg: 'Extrayendo información disponible...' });
-      await scrapeAndEmit(page, noches, emit, isGoodImg);
-      await browser.close();
-      emit('fin', {});
+    if (!detPage) {
+      emit('error', { msg: 'El portal no cargó la página del hotel. Intenta de nuevo.' });
+      await browser.close(); res.end(); return;
     }
 
+    console.log('✅ Página de detalle URL:', detPage.url().substring(0, 80));
+    emit('status', { msg: 'Cargando fotos y amenidades del hotel...' });
+
+    // ── ESPERAR QUE CARGUE BIEN ── (el portal tarda ~5s)
+    await detPage.waitForTimeout(6000);
+
+    // Esperar imágenes
+    try {
+      await detPage.waitForSelector('.hotel-images__image, .slick-slider', { timeout: 10000 });
+      console.log('✅ Galería visible');
+    } catch(e) { console.log('⚠️ Galería no detectada'); }
+
+    // Scroll para activar lazy loading
+    for (const pos of [300, 800, 1500, 2500, 0]) {
+      await detPage.evaluate(y => window.scrollTo(0, y), pos);
+      await detPage.waitForTimeout(600);
+    }
+    await detPage.waitForTimeout(1500);
+
+    // Navegar carrusel con teclas
+    try {
+      await detPage.waitForSelector('.slick-track', { timeout: 5000 });
+      for (let i = 0; i < 10; i++) {
+        await detPage.keyboard.press('ArrowRight');
+        await detPage.waitForTimeout(300);
+      }
+      for (let i = 0; i < 10; i++) {
+        await detPage.keyboard.press('ArrowLeft');
+        await detPage.waitForTimeout(200);
+      }
+    } catch(e) {}
+
+    // Forzar lazy loading
+    await detPage.evaluate(() => {
+      document.querySelectorAll('img[data-lazy],img[data-src]').forEach(img => {
+        const src = img.getAttribute('data-lazy') || img.getAttribute('data-src');
+        if (src && src.startsWith('http')) img.src = src;
+      });
+    });
+    await detPage.waitForTimeout(2000);
+
+    // ── EXTRAER TODO ──
+    await scrapeAndEmit(detPage, noches, emit, isGoodImg);
+    await browser.close();
+    emit('fin', {});
+
   } catch(err) {
-    if (browser) await browser.close().catch(()=>{});
+    if (browser) await browser.close().catch(() => {});
     console.error('❌ detail:', err.message);
-    emit('error', { msg: err.message });
+    emit('error', { msg: 'Error cargando el hotel: ' + err.message.substring(0, 100) });
   }
   res.end();
 });
+
 
 // ── Función compartida de scraping ──────────────────────────────
 async function scrapeAndEmit(page, noches, emit, isGoodImg) {
@@ -717,4 +780,4 @@ async function scrapeAndEmit(page, noches, emit, isGoodImg) {
 }
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v19 puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v20 puerto ${PORT}`));
