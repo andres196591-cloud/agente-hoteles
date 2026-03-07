@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 16 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 17 }));
 
 // ── Imágenes genéricas a bloquear ──
 const BAD_IMG_PATTERNS = [
@@ -55,7 +55,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v16 STREAM: "${ciudad}"`);
+  console.log(`🚀 v17 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -329,29 +329,22 @@ app.get('/hotel-detail', async (req, res) => {
 
     emit('status', { msg: 'Cargando fotos del hotel...' });
 
-    // Intentar abrir la galería haciendo clic en la imagen principal
+    // Scroll agresivo para activar lazy loading del carrusel slick
+    for (const pos of [300, 800, 1400, 2200, 3000, 1200, 0]) {
+      await det.evaluate(y => window.scrollTo(0, y), pos);
+      await det.waitForTimeout(700);
+    }
+    await det.waitForTimeout(2500);
+
+    // Intentar activar el carrusel de fotos (click en imagen principal del portal)
     try {
-      // Clic en la imagen hero/principal para abrir galería
-      const heroSelectors = [
-        '[class*="gallery"] img', '[class*="hero"] img', '[class*="slider"] img',
-        '[class*="main-image"] img', '[class*="property-image"] img',
-        '.image-gallery img', '[class*="photo"] img:first-child'
-      ];
-      for (const sel of heroSelectors) {
-        const el = await det.$(sel);
-        if (el) { await el.click(); await det.waitForTimeout(2000); break; }
-      }
+      const mainImg = await det.$('.hotel-images__main-image-wrapper img, .hotel-images__image');
+      if (mainImg) { await mainImg.click(); await det.waitForTimeout(1500); }
     } catch(e) { console.log('Gallery click:', e.message.substring(0,50)); }
 
-    // Scroll agresivo para activar lazy loading
-    for (const pos of [300, 700, 1200, 1800, 2500, 3200, 0]) {
-      await det.evaluate(y => window.scrollTo(0, y), pos);
-      await det.waitForTimeout(600);
-    }
-    // Volver arriba y esperar que carguen
-    await det.waitForTimeout(2000);
+    await det.waitForTimeout(1000);
 
-    // ── EXTRACCIÓN COMPLETA ──
+    // ── EXTRACCIÓN COMPLETA con selectores específicos del portal membergetaways ──
     const data = await det.evaluate((nochesParm) => {
       const BAD = ['logo','icon-','amenity','chain','flag','placeholder','noimage',
                    'package-D','no-image','blank.','default.jpg','rsi/assets'];
@@ -365,137 +358,141 @@ app.get('/hotel-detail', async (req, res) => {
                lower.match(/\.(jpg|jpeg|png|webp)/i);
       };
 
-      // ── FOTOS — extracción agresiva para portal membergetaways ──
       const fotos = [];
       const visto = new Set();
-
       const addSrc = (src) => {
         if (!src || src.length < 12) return;
-        // Limpiar query strings de tamaño para obtener mayor resolución
-        const cleanSrc = src.split('?')[0].includes('.') ? src : src;
-        if (esUrlBuena(cleanSrc) && !visto.has(cleanSrc)) {
-          visto.add(cleanSrc); fotos.push(cleanSrc);
-        }
+        if (esUrlBuena(src) && !visto.has(src)) { visto.add(src); fotos.push(src); }
       };
 
-      // 1. Todas las imágenes del DOM con todos los atributos posibles
-      document.querySelectorAll('img').forEach(img => {
-        const attrs = ['src','data-src','data-lazy','data-original','data-image',
-                       'data-full','data-large','data-zoom-image','data-highres'];
-        for (const a of attrs) {
-          const s = img.getAttribute(a) || '';
-          if (s.startsWith('http')) addSrc(s);
-        }
-        // naturalSrc si está disponible
-        if (img.currentSrc) addSrc(img.currentSrc);
-      });
+      // ── CAPA 1: Selectores EXACTOS del portal membergetaways (más confiables) ──
 
-      // 2. srcset — preferir la versión más grande
-      document.querySelectorAll('img[srcset],source[srcset]').forEach(el => {
-        const parts = (el.srcset||'').split(',').map(s => {
-          const [url, w] = s.trim().split(' ');
-          return { url, w: parseInt(w)||0 };
-        }).filter(p => p.url && p.url.startsWith('http'));
-        // Ordenar por ancho descendente para tener mayor resolución
-        parts.sort((a,b) => b.w - a.w);
-        parts.forEach(p => addSrc(p.url));
-      });
+      // Imagen principal
+      document.querySelectorAll('.hotel-images__main-image-wrapper img.hotel-images__image, .hotel-images__main-image-wrapper img')
+        .forEach(img => { addSrc(img.src || img.getAttribute('data-src') || ''); });
 
-      // 3. Background images en CSS (algunos portales las usan)
-      document.querySelectorAll('[style*="background"]').forEach(el => {
-        const m = (el.getAttribute('style')||'').match(/url\(['"]?(https?[^'")\s]+)['"]?\)/i);
-        if (m) addSrc(m[1]);
-      });
+      // Thumbnails de la galería estática
+      document.querySelectorAll('.hotel-images__other-image-wrapper img.hotel-images__image, .hotel-images__other-image-wrapper img')
+        .forEach(img => { addSrc(img.src || img.getAttribute('data-src') || ''); });
 
-      // 4. Buscar URLs de imágenes en atributos data-* de contenedores
-      document.querySelectorAll('[data-images],[data-photos],[data-gallery]').forEach(el => {
-        try {
-          const val = el.getAttribute('data-images') || el.getAttribute('data-photos') || el.getAttribute('data-gallery') || '';
-          const urls = val.match(/https?:\/\/[^\s"',\]]+\.(jpg|jpeg|png|webp)/gi) || [];
-          urls.forEach(u => addSrc(u));
-        } catch(e) {}
-      });
+      // Carrusel slick (las slides reales, no las clonadas)
+      document.querySelectorAll('.slick-slide:not(.slick-cloned) img.custom-carousel-image__item, .slick-slide:not(.slick-cloned) img')
+        .forEach(img => {
+          const attrs = ['src','data-src','data-lazy','data-original'];
+          for (const a of attrs) { const s = img.getAttribute(a)||''; if (s.startsWith('http')) { addSrc(s); break; } }
+        });
 
-      // 5. Buscar en scripts inline (algunos SPA guardan las imágenes en JSON)
-      document.querySelectorAll('script:not([src])').forEach(sc => {
-        const txt = sc.textContent || '';
-        if (!txt.includes('travelapi') && !txt.includes('expedia') && !txt.includes('media')) return;
-        const urls = (txt.match(/https?:\/\/\S+\.(?:jpg|jpeg|png|webp)/gi) || []);
-        urls.slice(0, 20).forEach(u => addSrc(u));
-      });
+      // ── CAPA 2: Cualquier img con clase hotel-images__image en todo el DOM ──
+      document.querySelectorAll('img.hotel-images__image')
+        .forEach(img => { addSrc(img.src || img.getAttribute('data-src') || ''); });
 
-      // ── NOMBRE ──
-      const nombre = (document.querySelector('h1,h2')?.textContent||'').trim();
+      // ── CAPA 3: Todos los data-* attrs en imgs restantes ──
+      if (fotos.length < 5) {
+        document.querySelectorAll('img').forEach(img => {
+          const attrs = ['src','data-src','data-lazy','data-original','data-image','data-full','data-large'];
+          for (const a of attrs) { const s = img.getAttribute(a)||''; if (s.startsWith('http')) addSrc(s); }
+          if (img.currentSrc) addSrc(img.currentSrc);
+        });
+      }
+
+      // ── CAPA 4: srcset ──
+      if (fotos.length < 5) {
+        document.querySelectorAll('img[srcset],source[srcset]').forEach(el => {
+          const parts = (el.srcset||'').split(',').map(s => {
+            const [url, w] = s.trim().split(' ');
+            return { url, w: parseInt(w)||0 };
+          }).filter(p => p.url && p.url.startsWith('http'));
+          parts.sort((a,b) => b.w - a.w);
+          parts.forEach(p => addSrc(p.url));
+        });
+      }
+
+      // ── NOMBRE (selector exacto del portal) ──
+      const nombre = (
+        document.querySelector('.hotel-info__title')?.textContent ||
+        document.querySelector('h1,h2')?.textContent || ''
+      ).trim();
 
       // ── DIRECCIÓN ──
-      let direccion = '';
-      for (const s of ['[class*="address"]','[class*="location"]','[itemprop="address"]']) {
-        const el = document.querySelector(s);
-        if (el) { direccion = el.textContent.trim().replace(/view map/gi,'').trim(); break; }
-      }
+      const direccion = (
+        document.querySelector('.hotel-info__address')?.textContent ||
+        document.querySelector('[class*="address"]')?.textContent || ''
+      ).trim().replace(/view map/gi,'').trim();
 
-      // ── DESCRIPCIÓN ──
+      // ── DESCRIPCIÓN (selector exacto del portal) ──
       let descripcion = '';
-      const descSels = ['[class*="description"]','[class*="about"]','[class*="overview"]',
-                        '[class*="detail"]>p','article p','main p'];
-      for (const s of descSels) {
-        for (const el of document.querySelectorAll(s)) {
-          const t = (el.innerText||el.textContent||'').trim();
-          if (t.length > 80 && t.length < 3000 && !t.match(/^\d/) && !t.includes('$')) {
-            descripcion = t.substring(0, 1500); break;
+      // Selector primario: .hotel-images__hotel-text (div > p interno)
+      const descEl = document.querySelector('.hotel-images__hotel-text');
+      if (descEl) {
+        const inner = descEl.querySelector('p,div') || descEl;
+        descripcion = (inner.innerText || inner.textContent || '').trim().substring(0, 1500);
+      }
+      // Fallback genérico si el primario no funciona
+      if (!descripcion || descripcion.length < 50) {
+        const descSels = ['[class*="description"]','[class*="about"]','[class*="overview"]'];
+        for (const s of descSels) {
+          for (const el of document.querySelectorAll(s)) {
+            const t = (el.innerText||el.textContent||'').trim();
+            if (t.length > 80 && t.length < 3000 && !t.includes('$')) {
+              descripcion = t.substring(0, 1500); break;
+            }
           }
+          if (descripcion && descripcion.length > 50) break;
         }
-        if (descripcion) break;
       }
 
-      // ── AMENITIES ──
+      // ── AMENIDADES (selector exacto del portal) ──
       const amenities = [];
       const amenVisto = new Set();
       const SKIP = /^(show more|show less|view map|reserve|book|check|select|filter|sort|price|per night|\$|US\$|refund|cancel|\d+ night|\d+ room)/i;
-      for (const s of ['[class*="amenit"] li','[class*="amenit"] span','[class*="facilit"] li',
-                       '[class*="feature"] li','[class*="perk"]','[data-testid*="amenity"]']) {
-        for (const el of document.querySelectorAll(s)) {
+
+      // Selector primario: .amenities__amenities-list .ant-list-item span
+      document.querySelectorAll('.amenities__amenities-list .ant-list-item span')
+        .forEach(el => {
           const t = (el.innerText||el.textContent||'').trim().replace(/\s+/g,' ');
-          if (t.length < 3 || t.length > 120 || SKIP.test(t) || amenVisto.has(t.toLowerCase())) continue;
+          if (t.length < 3 || t.length > 120 || SKIP.test(t) || amenVisto.has(t.toLowerCase())) return;
           amenVisto.add(t.toLowerCase()); amenities.push(t);
-          if (amenities.length >= 20) break;
+        });
+
+      // Fallback si no encontró con el selector exacto
+      if (amenities.length < 3) {
+        for (const s of ['[class*="amenit"] li','[class*="amenit"] span','[class*="facilit"] li','[class*="feature"] li']) {
+          for (const el of document.querySelectorAll(s)) {
+            const t = (el.innerText||el.textContent||'').trim().replace(/\s+/g,' ');
+            if (t.length < 3 || t.length > 120 || SKIP.test(t) || amenVisto.has(t.toLowerCase())) continue;
+            amenVisto.add(t.toLowerCase()); amenities.push(t);
+            if (amenities.length >= 20) break;
+          }
+          if (amenities.length >= 8) break;
         }
-        if (amenities.length >= 12) break;
       }
 
-      // ── PRECIOS — selector exacto del portal membergetaways ──
+      // ── PRECIOS (selector exacto del portal) ──
       const txt = document.body.innerText || '';
       let precioNoche = 0;
 
-      // 1. Selector EXACTO de la página de detalle del portal
-      //    En la página de detalle el precio total está en hotel-card-wrapper__price-total-text
-      //    o en selectores similares de la página de detalle
-      const detailPriceSels = [
-        '.hotel-card-wrapper__price-total-text',
-        '[class*="price-total-text"]',
-        '[class*="price-total"] p',
-        '[class*="room-price"] [class*="amount"]',
-        '[class*="room-rate"] [class*="price"]',
-        '[class*="total-price-value"]',
-        '[class*="price-per-night"]',
-        '[class*="nightly-rate"]',
-        '[class*="from-price"]'
-      ];
-      for (const ps of detailPriceSels) {
-        const pEl = document.querySelector(ps);
-        if (pEl) {
-          const pM = (pEl.textContent||'').match(/([\d,]+\.?\d+)/);
-          if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioNoche=v;break;} }
+      // 1. Selector EXACTO: .hotel-card-wrapper__price-total-text (en la sección de rooms)
+      const allPriceEls = document.querySelectorAll('.hotel-card-wrapper__price-total-text');
+      for (const pEl of allPriceEls) {
+        const pM = (pEl.textContent||'').match(/([\d,]+\.?\d+)/);
+        if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioNoche=v;break;} }
+      }
+
+      // 2. Alternativas de selector
+      if (!precioNoche) {
+        for (const ps of ['[class*="price-total-text"]','[class*="price-total"] p','[class*="price-per-night"]']) {
+          const pEl = document.querySelector(ps);
+          if (pEl) { const pM=(pEl.textContent||'').match(/([\d,]+\.?\d+)/); if(pM){const v=parseFloat(pM[1].replace(/,/g,''));if(v>5){precioNoche=v;break;}} }
         }
       }
 
-      // 2. Patrón textual "From US$XX per night" o "US$XX per night"
+      // 3. Patrón "From US$XX per night"
       if (!precioNoche) {
         const fromM = txt.match(/[Ff]rom[\s\n]*US\$\s*([\d,]+\.?\d*)\s*[\n]*per night/);
         if (fromM) { const v=parseFloat(fromM[1].replace(/,/g,'')); if(v>5) precioNoche=v; }
       }
 
-      // 3. Fallback: texto filtrando contextos de "savings/public/save"
+      // 4. Fallback: filtrar líneas de savings
       if (!precioNoche) {
         const txtClean = txt.split('\n')
           .filter(l => !/savings|public rate|save \d+%|client cash|you save/i.test(l))
@@ -506,17 +503,21 @@ app.get('/hotel-detail', async (req, res) => {
         if (allP.length) precioNoche = Math.min(...allP);
       }
 
-
-      // ── RATING ──
-      const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
+      // ── RATING (selector exacto del portal) ──
+      const ratingEl = document.querySelector('.guest-ratings__reviews-rating');
+      const ratingTxt = ratingEl?.textContent || '';
+      const ratingM = ratingTxt.match(/(\d\.\d)/) || txt.match(/(\d\.\d{1,2})\s*\//);
       const reviewM = txt.match(/\(?(\d[\d,]+)\s*reviews?\)?/i);
-      const starM = txt.match(/(\d)\s*star/i);
+      const starM = (document.querySelectorAll('.hotel-info__star').length > 0)
+        ? [null, document.querySelectorAll('.hotel-info__star').length.toString()]
+        : txt.match(/(\d)\s*star/i);
 
       return {
-        nombre, direccion, descripcion, amenities,
+        nombre, direccion, descripcion,
+        amenities: amenities.slice(0, 20),
         fotos: fotos.slice(0, 10),
-        precioNoche: precioNoche ? `US$ ${Math.round(precioNoche)}` : '',
-        precioTotal: precioNoche ? `US$ ${Math.round(precioNoche * nochesParm)}` : '',
+        precioNoche: precioNoche ? `US$ ${precioNoche.toFixed(2)}` : '',
+        precioTotal: precioNoche ? `US$ ${(precioNoche * nochesParm).toFixed(2)}` : '',
         noches: nochesParm,
         estrellas: starM?.[1]||'',
         rating: ratingM?.[1]||'',
@@ -554,4 +555,4 @@ app.get('/hotel-detail', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v16 puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v17 puerto ${PORT}`));
