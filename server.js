@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 21 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 22 }));
 
 // ── Imágenes genéricas a bloquear ──
 const BAD_IMG_PATTERNS = [
@@ -55,7 +55,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v21 STREAM: "${ciudad}"`);
+  console.log(`🚀 v22 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -81,46 +81,6 @@ app.get('/stream-hoteles', async (req, res) => {
 
     // ── BUSCADOR ──
     const page = await ctx.newPage();
-
-    // ── INTERCEPTAR RESPUESTAS DE LA API para capturar hotel IDs ──
-    // El portal carga los hoteles via API REST — capturamos los IDs del JSON
-    const hotelIdMap = new Map(); // nombre -> id
-
-    page.on('response', async (response) => {
-      try {
-        const url = response.url();
-        // La API del portal devuelve listas de hoteles en JSON
-        if (!url.includes('membergetaways') && !url.includes('rsi')) return;
-        if (!url.includes('hotel') && !url.includes('propert') && !url.includes('search')) return;
-        const ct = response.headers()['content-type'] || '';
-        if (!ct.includes('json')) return;
-
-        const json = await response.json().catch(() => null);
-        if (!json) return;
-
-        // Buscar hoteles en la respuesta — pueden estar en distintas rutas
-        const buscarHoteles = (obj, depth=0) => {
-          if (!obj || depth > 6) return;
-          if (Array.isArray(obj)) {
-            obj.forEach(item => buscarHoteles(item, depth+1));
-            return;
-          }
-          if (typeof obj !== 'object') return;
-
-          // Si tiene id + name (o similar), es un hotel
-          const id = obj.id || obj.hotelId || obj.propertyId || obj.hotel_id;
-          const name = obj.name || obj.hotelName || obj.title || obj.propertyName;
-          if (id && name && String(id).match(/^\d{4,8}$/)) {
-            const key = String(name).toLowerCase().trim().substring(0, 40);
-            hotelIdMap.set(key, String(id));
-            console.log(`📡 API hotel: "${name}" → ID: ${id}`);
-          }
-          Object.values(obj).forEach(v => buscarHoteles(v, depth+1));
-        };
-        buscarHoteles(json);
-      } catch(e) {}
-    });
-
     await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(5000);
 
@@ -215,58 +175,7 @@ app.get('/stream-hoteles', async (req, res) => {
             if (visto.has(nombre)) break;
             visto.add(nombre);
 
-            // Extraer enlace del hotel — el botón "Select room" no tiene href,
-            // buscar el ID en data-attrs o en atributos del contenedor
-            let link = '';
-            // 1. Buscar href directo con /rsi/hotel/
-            const aHotel = el.querySelector('a[href*="/rsi/hotel/"], a[href*="hotel/"]');
-            if (aHotel) link = aHotel.href;
-            // 2. Buscar data-hotel-id, data-id, data-property-id en el contenedor
-            if (!link) {
-              const hotelId = el.getAttribute('data-hotel-id') ||
-                              el.getAttribute('data-id') ||
-                              el.getAttribute('data-property-id') ||
-                              el.querySelector('[data-hotel-id]')?.getAttribute('data-hotel-id') ||
-                              el.querySelector('[data-id]')?.getAttribute('data-id') ||
-                              el.querySelector('[data-property-id]')?.getAttribute('data-property-id') ||
-                              el.querySelector('.hotel-card-wrapper__price-btn')?.getAttribute('data-hotel-id') ||
-                              el.querySelector('[class*="price-btn"]')?.getAttribute('data-id');
-              if (hotelId && /^\d+$/.test(hotelId)) {
-                link = `https://portal.membergetaways.com/rsi/hotel/${hotelId}`;
-              }
-            }
-            // 3. Buscar en onclick o en atributos del botón Select room
-            if (!link) {
-              const btn = el.querySelector('.hotel-card-wrapper__price-btn, [class*="price-btn"], [class*="select-room"]');
-              if (btn) {
-                const onclick = btn.getAttribute('onclick') || '';
-                const idM = onclick.match(/(\d{4,8})/);
-                if (idM) link = `https://portal.membergetaways.com/rsi/hotel/${idM[1]}`;
-                // También revisar data attrs del botón
-                for (const attr of btn.getAttributeNames()) {
-                  const val = btn.getAttribute(attr);
-                  if (/^\d{5,8}$/.test(val)) {
-                    link = `https://portal.membergetaways.com/rsi/hotel/${val}`; break;
-                  }
-                }
-              }
-            }
-            // 4. Buscar ID en el HTML completo del elemento (patron /rsi/hotel/ID)
-            if (!link) {
-              const htmlStr = el.innerHTML || '';
-              const m = htmlStr.match(/\/rsi\/hotel\/(\d+)/);
-              if (m) link = `https://portal.membergetaways.com/rsi/hotel/${m[1]}`;
-            }
-            // 5. Buscar cualquier número que parezca un hotel ID en atributos de todos los hijos
-            if (!link) {
-              for (const child of el.querySelectorAll('*')) {
-                for (const attr of child.getAttributeNames()) {
-                  const val = child.getAttribute(attr) || '';
-                  if (/^https?:\/\/.*\/hotel\//.test(val)) { link = val; break; }
-                }
-                if (link) break;
-              }
-            }
+            const link = el.querySelector('a[href*="detail"],a[href*="hotel"],a[href*="property"],a')?.href || '';
 
             // Precio: selector exacto del portal membergetaways
             let precioFinal = 0;
@@ -322,7 +231,7 @@ app.get('/stream-hoteles', async (req, res) => {
               reviews: reviewM ? reviewM[1] : '',
               ahorro: saveM ? `Save ${saveM[1]}%` : '',
               direccion: (addrEl?.textContent?.trim() || distM?.[0] || '').replace(/view map/gi,'').trim().substring(0, 150),
-              enlace: link || window.location.href,
+              enlace: link,
               descripcion: '',
               fuente: 'portal'
             });
@@ -341,26 +250,6 @@ app.get('/stream-hoteles', async (req, res) => {
     for (let round = 0; round < 25; round++) {
       const lista = await extraerLista();
       const nuevos = lista.filter(h => !enviados.has(h.nombre.toLowerCase()));
-
-      // ── Enriquecer enlaces con IDs capturados de la API ──
-      nuevos.forEach(h => {
-        if (!h.enlace) {
-          const key = h.nombre.toLowerCase().trim().substring(0, 40);
-          // Buscar coincidencia exacta o parcial en el mapa
-          let id = hotelIdMap.get(key);
-          if (!id) {
-            for (const [k, v] of hotelIdMap.entries()) {
-              if (key.includes(k.substring(0,15)) || k.includes(key.substring(0,15))) {
-                id = v; break;
-              }
-            }
-          }
-          if (id) {
-            h.enlace = `https://portal.membergetaways.com/rsi/hotel/${id}`;
-            console.log(`🔗 Enlace asignado: "${h.nombre}" → ${h.enlace}`);
-          }
-        }
-      });
 
       if (nuevos.length === 0) {
         scrollsVacios++;
@@ -381,13 +270,6 @@ app.get('/stream-hoteles', async (req, res) => {
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForTimeout(2800);
     }
-
-    // Log de IDs capturados via API
-    console.log(`📡 Hotel IDs capturados via API: ${hotelIdMap.size}`, [...hotelIdMap.entries()].slice(0,5));
-    console.log(`📡 Hoteles sin enlace: ${[...enviados].filter(n => {
-      // just count
-      return true;
-    }).length}`);
 
     await browser.close();
     emit('fin', { total });
