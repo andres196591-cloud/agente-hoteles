@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 25 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 26 }));
 
 // ── CACHÉ EN MEMORIA: guarda sesión y URL de resultados por búsqueda ──
 // Clave: "destino|checkin|checkout"  Valor: { searchUrl, cookies, ts }
@@ -64,7 +64,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v25 STREAM: "${ciudad}"`);
+  console.log(`🚀 v26 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -90,20 +90,20 @@ app.get('/stream-hoteles', async (req, res) => {
 
     // ── BUSCADOR ──
     const page = await ctx.newPage();
-    await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(5000);
+    await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 40000 });
+    await page.waitForTimeout(8000);
 
     // ── DESTINO — con retry si falla el selector ──
     let inputFound = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        await page.waitForSelector('.ant-select-selection-search-input', { timeout: 12000 });
+        await page.waitForSelector('.ant-select-selection-search-input', { timeout: 18000 });
         inputFound = true;
         break;
       } catch {
         console.log(`⚠️ Intento ${attempt+1}: selector no encontrado, recargando...`);
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
-        await page.waitForTimeout(5000);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(8000);
       }
     }
     if (!inputFound) {
