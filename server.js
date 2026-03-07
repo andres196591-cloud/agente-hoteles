@@ -181,68 +181,117 @@ app.get('/stream-hoteles', async (req, res) => {
       });
     };
 
-    // ── FUNCIÓN: entrar al hotel y extraer fotos reales + descripción ──
+    // ── FUNCIÓN: entrar al hotel y extraer fotos reales + descripción + amenities ──
     const enrichHotel = async (hotel) => {
       if (!hotel.enlace || !hotel.enlace.startsWith('http')) return hotel;
       const detailPage = await ctx.newPage();
       try {
         await detailPage.goto(hotel.enlace, { waitUntil: 'domcontentloaded', timeout: 18000 });
-        await detailPage.waitForTimeout(3000);
+        await detailPage.waitForTimeout(4000);
+
+        // Intentar hacer scroll para cargar imágenes lazy
+        await detailPage.evaluate(() => window.scrollTo(0, 600));
+        await detailPage.waitForTimeout(1500);
+        await detailPage.evaluate(() => window.scrollTo(0, 1200));
+        await detailPage.waitForTimeout(1000);
+        await detailPage.evaluate(() => window.scrollTo(0, 0));
+        await detailPage.waitForTimeout(500);
 
         const data = await detailPage.evaluate(() => {
           const fotos = [];
           const vistasImg = new Set();
+          const BAD = ['logo','icon-','amenity','chain','flag','placeholder','noimage','package-D','no-image','blank.','default.jpg'];
 
-          // Buscar todas las imágenes reales del hotel
-          const allImgs = Array.from(document.querySelectorAll('img'));
-          for (const img of allImgs) {
-            const src = img.src || img.dataset.src || img.getAttribute('data-lazy') || '';
-            if (!src || src.length < 10) continue;
+          const esUrlBuena = (src) => {
+            if (!src || src.length < 10) return false;
             const lower = src.toLowerCase();
-            if (!lower.includes('travelapi') && !lower.includes('expedia') && !lower.includes('media') && !lower.match(/\.(jpg|jpeg|png|webp)/i)) continue;
-            if (['logo','icon-','amenity','chain','flag','placeholder','noimage','package-D'].some(p => lower.includes(p))) continue;
-            if (vistasImg.has(src)) continue;
-            // Preferir imágenes grandes
-            const w = img.naturalWidth || img.width || 0;
-            const h = img.naturalHeight || img.height || 0;
-            if (w > 0 && w < 100) continue; // muy pequeña
-            vistasImg.add(src);
-            fotos.push(src);
-            if (fotos.length >= 8) break;
+            if (BAD.some(p => lower.includes(p))) return false;
+            return (lower.includes('travelapi') || lower.includes('expedia') || lower.includes('media') || lower.includes('hotelbeds') || lower.includes('iceportal')) && lower.match(/\.(jpg|jpeg|png|webp)/i);
+          };
+
+          // 1. Buscar en galería/slider primero (prioridad)
+          const galSelectors = [
+            '[class*="gallery"] img', '[class*="slider"] img', '[class*="carousel"] img',
+            '[class*="photo"] img', '[class*="image-gallery"] img', '[class*="hero"] img',
+            '[class*="media"] img', '[data-testid*="image"] img'
+          ];
+          for (const sel of galSelectors) {
+            document.querySelectorAll(sel).forEach(img => {
+              const src = img.src || img.dataset.src || img.getAttribute('data-lazy') || img.getAttribute('data-original') || '';
+              if (esUrlBuena(src) && !vistasImg.has(src)) {
+                const w = img.naturalWidth || img.width || 0;
+                if (w > 0 && w < 80) return;
+                vistasImg.add(src); fotos.push(src);
+              }
+            });
           }
 
-          // Si hay srcset, también extraer de ahí
+          // 2. Buscar en srcset (versiones de alta resolución)
           document.querySelectorAll('img[srcset],source[srcset]').forEach(el => {
             const srcset = el.srcset || '';
             const srcs = srcset.split(',').map(s => s.trim().split(' ')[0]).filter(s => s && s.startsWith('http'));
             for (const src of srcs) {
-              const lower = src.toLowerCase();
-              if ((lower.includes('travelapi') || lower.includes('expedia') || lower.includes('media')) && lower.match(/\.(jpg|jpeg|png|webp)/i)) {
-                if (!vistasImg.has(src)) { vistasImg.add(src); fotos.push(src); }
-              }
+              if (esUrlBuena(src) && !vistasImg.has(src)) { vistasImg.add(src); fotos.push(src); }
             }
           });
 
-          // Descripción: buscar párrafos descriptivos
+          // 3. Todas las imágenes del DOM (fallback)
+          document.querySelectorAll('img').forEach(img => {
+            const src = img.src || img.dataset.src || img.getAttribute('data-lazy') || img.getAttribute('data-original') || '';
+            if (!esUrlBuena(src) || vistasImg.has(src)) return;
+            const w = img.naturalWidth || img.width || 0;
+            if (w > 0 && w < 80) return;
+            vistasImg.add(src); fotos.push(src);
+          });
+
+          // Limitar a 10 fotos únicas de calidad
+          const fotosFinales = fotos.slice(0, 10);
+
+          // ── DESCRIPCIÓN completa ──
           let descripcion = '';
           const posibleDesc = [
             '[class*="description"]', '[class*="about"]', '[class*="overview"]',
-            '[class*="detail"]>p', '[class*="content"]>p', 'article p', '.property-description',
-            '[data-testid*="description"]'
+            '[class*="detail"]>p', '[class*="content"]>p', 'article p',
+            '.property-description', '[data-testid*="description"]', 'main p'
           ];
           for (const sel of posibleDesc) {
             const els = Array.from(document.querySelectorAll(sel));
             for (const el of els) {
               const txt = (el.innerText || el.textContent || '').trim();
-              if (txt.length > 80 && txt.length < 2000 && !txt.match(/^\d/) && !txt.includes('$')) {
-                descripcion = txt.substring(0, 600);
+              if (txt.length > 80 && txt.length < 3000 && !txt.match(/^\d/) && !txt.includes('$')) {
+                descripcion = txt.substring(0, 1200);
                 break;
               }
             }
             if (descripcion) break;
           }
 
-          // Nombre del hotel en la página de detalle (para confirmar)
+          // ── AMENITIES ──
+          const amenities = [];
+          const amenSels = [
+            '[class*="amenit"] li', '[class*="amenit"] span', '[class*="amenit"] div',
+            '[class*="facilit"] li', '[class*="facilit"] span',
+            '[class*="feature"] li', '[class*="feature"] span',
+            '[data-testid*="amenity"]', '[class*="perk"]',
+            'ul li' // fallback general
+          ];
+          const amenVisto = new Set();
+          const SKIP_AMENITY = /^(show more|show less|view map|reserve|book|check|select|filter|sort|price|per night|\$|US\$|refund|cancel|free cancel|\d+ night|\d+ room)/i;
+          for (const sel of amenSels) {
+            const els = Array.from(document.querySelectorAll(sel));
+            for (const el of els) {
+              const txt = (el.innerText || el.textContent || '').trim().replace(/\s+/g,' ');
+              if (txt.length < 3 || txt.length > 120) continue;
+              if (SKIP_AMENITY.test(txt)) continue;
+              if (amenVisto.has(txt.toLowerCase())) continue;
+              amenVisto.add(txt.toLowerCase());
+              amenities.push(txt);
+              if (amenities.length >= 20) break;
+            }
+            if (amenities.length >= 12) break;
+          }
+
+          // Nombre del hotel en la página de detalle
           const nombreEl = document.querySelector('h1,h2');
           const nombreDetalle = nombreEl ? nombreEl.textContent.trim() : '';
 
@@ -250,7 +299,7 @@ app.get('/stream-hoteles', async (req, res) => {
           const addrEl = document.querySelector('[class*="address"],[class*="location"],[itemprop="address"]');
           const direccionDetalle = addrEl ? addrEl.textContent.trim().replace(/view map/gi,'').trim() : '';
 
-          return { fotos, descripcion, nombreDetalle, direccionDetalle };
+          return { fotos: fotosFinales, descripcion, nombreDetalle, direccionDetalle, amenities };
         });
 
         const fotosReales = data.fotos.filter(s => isGoodImg(s));
@@ -259,10 +308,11 @@ app.get('/stream-hoteles', async (req, res) => {
           hotel.imagenes = fotosReales;
         }
         if (data.descripcion) hotel.descripcion = data.descripcion;
+        if (data.amenities && data.amenities.length > 0) hotel.amenities = data.amenities;
         if (data.direccionDetalle && data.direccionDetalle.length > hotel.direccion.length) {
           hotel.direccion = data.direccionDetalle.substring(0, 150);
         }
-        console.log(`  📸 ${hotel.nombre}: ${fotosReales.length} fotos, desc: ${data.descripcion.length} chars`);
+        console.log(`  📸 ${hotel.nombre}: ${fotosReales.length} fotos, ${(data.amenities||[]).length} amenities, desc: ${data.descripcion.length} chars`);
       } catch(e) {
         console.log(`  ⚠️ Detail error ${hotel.nombre}: ${e.message.substring(0,60)}`);
       } finally {
