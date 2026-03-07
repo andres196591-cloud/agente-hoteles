@@ -176,8 +176,30 @@ app.get('/stream-hoteles', async (req, res) => {
             visto.add(nombre);
 
             const link = el.querySelector('a[href*="detail"],a[href*="hotel"],a[href*="property"],a')?.href || '';
-            const precios = (txt.match(/US\$\s*[\d,]+\.?\d*/gi) || []).map(p => parseFloat(p.replace(/US\$\s*/i, '').replace(/,/g, ''))).filter(n => n > 0);
-            const precioMin = precios.length ? Math.min(...precios) : 0;
+
+            // Precio: buscar en selectores específicos de precio primero
+            let precioFinal = 0;
+            // 1. Buscar en el elemento específico de precio (per night / internet rate)
+            const priceSels = [
+              '[class*="price-per-night"]','[class*="nightly"]','[class*="per-night"]',
+              '[class*="internet-rate"]','[class*="member-rate"]','[class*="rate-amount"]',
+              '[class*="from-price"]','[class*="starting-price"]'
+            ];
+            for (const ps of priceSels) {
+              const pEl = el.querySelector(ps);
+              if (pEl) {
+                const pM = (pEl.textContent||'').match(/US\$\s*([\d,]+\.?\d*)/);
+                if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioFinal=v;break;} }
+              }
+            }
+            // 2. Fallback: todos los precios del texto, pero solo > $5 para evitar badges/UI
+            if (!precioFinal) {
+              const allP = (txt.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
+                .map(p=>parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
+                .filter(n=>n>5&&n<99999);
+              if (allP.length) precioFinal = Math.min(...allP);
+            }
+
             const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
             const reviewM = txt.match(/\(?(\d[\d,]+)\s*reviews?\)?/i);
             const saveM = txt.match(/save\s*(\d+)%/i);
@@ -186,7 +208,7 @@ app.get('/stream-hoteles', async (req, res) => {
 
             results.push({
               nombre,
-              precio: precioMin ? `US$ ${Math.round(precioMin)}` : '',
+              precio: precioFinal ? `US$ ${Math.round(precioFinal)}` : '',
               imagen: src,
               imagenes: [src],
               rating: ratingM ? ratingM[1] : '',
@@ -425,12 +447,40 @@ app.get('/hotel-detail', async (req, res) => {
         if (amenities.length >= 12) break;
       }
 
-      // ── PRECIOS ──
+      // ── PRECIOS — buscar en selectores específicos para evitar valores falsos ──
       const txt = document.body.innerText || '';
-      const precioMatches = (txt.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
-        .map(p => parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
-        .filter(n => n > 10 && n < 99999);
-      const precioNoche = precioMatches.length ? Math.min(...precioMatches) : 0;
+      let precioNoche = 0;
+
+      // 1. Buscar precio en elementos específicos del portal membergetaways
+      const priceSelectors = [
+        '[class*="price-per-night"]', '[class*="nightly-rate"]', '[class*="per-night"]',
+        '[class*="internet-rate"] [class*="price"]', '[class*="internet-rate"] [class*="amount"]',
+        '[class*="member-price"]', '[class*="your-price"]', '[class*="sale-price"]',
+        '[class*="from"] [class*="price"]', '.price-value', '.rate-value',
+        '[class*="price-box"] [class*="amount"]'
+      ];
+      for (const ps of priceSelectors) {
+        const pEl = document.querySelector(ps);
+        if (pEl) {
+          const pM = (pEl.textContent||'').match(/US\$\s*([\d,]+\.?\d*)/);
+          if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioNoche=v;break;} }
+        }
+      }
+
+      // 2. Buscar el bloque 'From US$XX per night' que es el patrón del portal
+      if (!precioNoche) {
+        const fromM = txt.match(/[Ff]rom[\s\n]*US\$\s*([\d,]+\.?\d*)\s*[\n]*per night/);
+        if (fromM) { const v=parseFloat(fromM[1].replace(/,/g,'')); if(v>5) precioNoche=v; }
+      }
+
+      // 3. Fallback: todos los precios, filtrando valores claramente inválidos (<$5)
+      if (!precioNoche) {
+        const allP = (txt.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
+          .map(p=>parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
+          .filter(n=>n>5&&n<99999);
+        if (allP.length) precioNoche = Math.min(...allP);
+      }
+
 
       // ── RATING ──
       const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
