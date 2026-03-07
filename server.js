@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 24 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 25 }));
 
 // ── CACHÉ EN MEMORIA: guarda sesión y URL de resultados por búsqueda ──
 // Clave: "destino|checkin|checkout"  Valor: { searchUrl, cookies, ts }
@@ -64,7 +64,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v24 STREAM: "${ciudad}"`);
+  console.log(`🚀 v25 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -426,33 +426,55 @@ app.get('/hotel-detail', async (req, res) => {
     const nBotones = await page.$$eval('.hotel-card-wrapper__price-btn', btns => btns.length);
     console.log(`🔘 Botones Select room: ${nBotones}`);
 
-    // Buscar el botón del hotel correcto por nombre
+    // ── Buscar el hotel por nombre y hacer clic en SU botón ──
+    // Estrategia: buscar el contenedor .hotel-card-wrapper que tenga el nombre,
+    // y hacer clic en su propio .hotel-card-wrapper__price-btn
     let clickResult = await page.evaluate((buscarNombre) => {
-      const btns = document.querySelectorAll('.hotel-card-wrapper__price-btn');
-      for (const btn of btns) {
-        // Subir hasta encontrar el contenedor de la tarjeta
-        let card = btn.parentElement;
-        for (let i = 0; i < 8; i++) {
-          const txt = (card?.innerText || card?.textContent || '').toLowerCase();
-          if (txt.length > 20) {
-            if (!buscarNombre || txt.includes(buscarNombre.substring(0, 12))) {
-              btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              btn.click();
-              return { ok: true, found: true, cardText: txt.substring(0, 80) };
-            }
-            break;
+      const debug = [];
+
+      // Opción A: buscar por contenedor de tarjeta completa
+      const containers = document.querySelectorAll('.hotel-card-wrapper, .hotel-card, [class*="result-wrapper__wrapper"]');
+      debug.push('Contenedores encontrados: ' + containers.length);
+
+      for (const card of containers) {
+        // Buscar el nombre dentro de la tarjeta
+        const nameEl = card.querySelector('h2,h3,h4,strong,[class*="hotel-name"],[class*="property-name"],[class*="title"]');
+        const cardName = (nameEl?.innerText || nameEl?.textContent || '').trim().toLowerCase();
+        if (!cardName || cardName.length < 3) continue;
+
+        debug.push('Tarjeta: ' + cardName.substring(0, 40));
+
+        // Verificar si el nombre coincide
+        const buscar = buscarNombre.toLowerCase().trim();
+        // Comparar las primeras palabras significativas
+        const palabras = buscar.split(' ').filter(p => p.length > 2);
+        const coincide = palabras.length > 0
+          ? palabras.filter(p => cardName.includes(p)).length >= Math.ceil(palabras.length * 0.6)
+          : cardName.includes(buscar.substring(0, 10));
+
+        if (coincide) {
+          const btn = card.querySelector('.hotel-card-wrapper__price-btn, [class*="price-btn"]');
+          if (btn) {
+            btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            btn.click();
+            return { ok: true, found: true, cardName, debug };
           }
-          card = card?.parentElement;
         }
       }
-      // Fallback: clic en el primer botón
-      if (btns.length > 0) {
-        btns[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-        btns[0].click();
-        return { ok: true, found: false, fallback: true };
+
+      // Opción B: no encontró por nombre — loggear qué nombres hay y usar fallback
+      debug.push('No coincidió ninguno con: ' + buscarNombre);
+      const primerBtn = document.querySelector('.hotel-card-wrapper__price-btn, [class*="price-btn"]');
+      if (primerBtn) {
+        primerBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        primerBtn.click();
+        return { ok: true, found: false, fallback: true, debug };
       }
-      return { ok: false };
+      return { ok: false, debug };
     }, nombre);
+
+    console.log('🖱️ Click result:', JSON.stringify(clickResult));
+    if (clickResult.debug) console.log('🔍 Debug:', clickResult.debug.join(' | '));
 
     console.log('🖱️ Click result:', JSON.stringify(clickResult));
 
