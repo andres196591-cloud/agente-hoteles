@@ -366,5 +366,214 @@ app.get('/stream-hoteles', async (req, res) => {
   res.end();
 });
 
+// ══════════════════════════════════════════════════════
+// ENDPOINT: /hotel-detail  — SSE en tiempo real
+// Entra al hotel y transmite fotos + info completa
+// ══════════════════════════════════════════════════════
+app.get('/hotel-detail', async (req, res) => {
+  const { enlace, checkin, checkout } = req.query;
+  if (!enlace) { res.status(400).json({ error: 'no enlace' }); return; }
+
+  // Calcular noches
+  let noches = 1;
+  if (checkin && checkout) {
+    const d1 = new Date(checkin), d2 = new Date(checkout);
+    const diff = Math.round((d2 - d1) / 86400000);
+    if (diff > 0) noches = diff;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const emit = (tipo, data) => {
+    try { res.write(`data: ${JSON.stringify({ tipo, ...data })}\n\n`); } catch(e) {}
+  };
+
+  let browser;
+  try {
+    const { chromium } = require('playwright');
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
+             '--disable-gpu','--single-process','--no-zygote']
+    });
+    const ctx = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+    });
+
+    emit('status', { msg: 'Iniciando sesión...' });
+
+    // ── LOGIN ──
+    const page = await ctx.newPage();
+    await page.goto('https://login.orohorizonsclub.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
+    await page.evaluate(() => { const m = document.getElementById('myModal'); if (m) m.style.display = 'flex'; });
+    await page.waitForTimeout(1000);
+    await page.fill('#myModal input[name="username"]', 'orothomas');
+    await page.fill('#myModal input[type="password"]', 'OroHC213&');
+    await page.click('#myModal button:has-text("Log in")');
+    await page.waitForTimeout(8000);
+    await page.close();
+
+    emit('status', { msg: 'Cargando información del hotel...' });
+
+    // ── PÁGINA DE DETALLE ──
+    const det = await ctx.newPage();
+    await det.goto(enlace, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await det.waitForTimeout(3500);
+
+    // Scroll para cargar imágenes lazy
+    emit('status', { msg: 'Cargando galería de fotos...' });
+    await det.evaluate(() => window.scrollTo(0, 500));
+    await det.waitForTimeout(1200);
+    await det.evaluate(() => window.scrollTo(0, 1200));
+    await det.waitForTimeout(1000);
+    await det.evaluate(() => window.scrollTo(0, 2000));
+    await det.waitForTimeout(800);
+    await det.evaluate(() => window.scrollTo(0, 0));
+    await det.waitForTimeout(600);
+
+    // ── EXTRACCIÓN COMPLETA ──
+    const data = await det.evaluate((nochesParm) => {
+      const BAD = ['logo','icon-','amenity','chain','flag','placeholder','noimage','package-D','no-image','blank.','default.jpg','rsi/assets'];
+      const esUrlBuena = (src) => {
+        if (!src || src.length < 10) return false;
+        const lower = src.toLowerCase();
+        if (BAD.some(p => lower.includes(p))) return false;
+        return (lower.includes('travelapi') || lower.includes('expedia') || lower.includes('media') ||
+                lower.includes('hotelbeds') || lower.includes('iceportal')) && lower.match(/\.(jpg|jpeg|png|webp)/i);
+      };
+
+      // ── FOTOS: buscar primero en galerías ──
+      const fotos = [];
+      const visto = new Set();
+      const galSels = [
+        '[class*="gallery"] img','[class*="slider"] img','[class*="carousel"] img',
+        '[class*="photo"] img','[class*="hero"] img','[class*="image-gallery"] img',
+        '[class*="media"] img','[data-testid*="image"] img','[class*="room"] img'
+      ];
+      for (const sel of galSels) {
+        document.querySelectorAll(sel).forEach(img => {
+          const src = img.src || img.dataset.src || img.getAttribute('data-lazy') || img.getAttribute('data-original') || '';
+          if (!esUrlBuena(src) || visto.has(src)) return;
+          const w = img.naturalWidth || img.width || 0;
+          if (w > 0 && w < 80) return;
+          visto.add(src); fotos.push(src);
+        });
+      }
+      // srcset
+      document.querySelectorAll('img[srcset],source[srcset]').forEach(el => {
+        (el.srcset||'').split(',').map(s=>s.trim().split(' ')[0]).filter(s=>s.startsWith('http')).forEach(src => {
+          if (esUrlBuena(src) && !visto.has(src)) { visto.add(src); fotos.push(src); }
+        });
+      });
+      // fallback todas
+      document.querySelectorAll('img').forEach(img => {
+        const src = img.src || img.dataset.src || img.getAttribute('data-lazy') || '';
+        if (!esUrlBuena(src) || visto.has(src)) return;
+        const w = img.naturalWidth || img.width || 0;
+        if (w > 0 && w < 80) return;
+        visto.add(src); fotos.push(src);
+      });
+
+      // ── NOMBRE ──
+      const nombre = (document.querySelector('h1,h2')?.textContent||'').trim();
+
+      // ── DIRECCIÓN ──
+      const addrSels = ['[class*="address"]','[class*="location"]','[itemprop="address"]','[class*="addr"]'];
+      let direccion = '';
+      for (const s of addrSels) {
+        const el = document.querySelector(s);
+        if (el) { direccion = el.textContent.trim().replace(/view map/gi,'').trim(); break; }
+      }
+
+      // ── DESCRIPCIÓN ──
+      let descripcion = '';
+      const descSels = ['[class*="description"]','[class*="about"]','[class*="overview"]','[class*="detail"]>p','article p','main p','[class*="content"]>p'];
+      for (const s of descSels) {
+        for (const el of document.querySelectorAll(s)) {
+          const t = (el.innerText||el.textContent||'').trim();
+          if (t.length > 80 && t.length < 3000 && !t.match(/^\d/) && !t.includes('$')) {
+            descripcion = t.substring(0, 1500); break;
+          }
+        }
+        if (descripcion) break;
+      }
+
+      // ── AMENITIES ──
+      const amenities = [];
+      const amenVisto = new Set();
+      const SKIP = /^(show more|show less|view map|reserve|book|check|select|filter|sort|price|per night|\$|US\$|refund|cancel|\d+ night|\d+ room|free cancel)/i;
+      const amenSels = ['[class*="amenit"] li','[class*="amenit"] span','[class*="facilit"] li','[class*="facilit"] span','[class*="feature"] li','[class*="perk"]','[data-testid*="amenity"]'];
+      for (const s of amenSels) {
+        for (const el of document.querySelectorAll(s)) {
+          const t = (el.innerText||el.textContent||'').trim().replace(/\s+/g,' ');
+          if (t.length < 3 || t.length > 120 || SKIP.test(t) || amenVisto.has(t.toLowerCase())) continue;
+          amenVisto.add(t.toLowerCase()); amenities.push(t);
+          if (amenities.length >= 20) break;
+        }
+        if (amenities.length >= 12) break;
+      }
+
+      // ── PRECIOS ──
+      const txt = document.body.innerText || '';
+      const precioMatches = (txt.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
+        .map(p => parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
+        .filter(n => n > 10 && n < 99999);
+      const precioNoche = precioMatches.length ? Math.min(...precioMatches) : 0;
+      const precioTotal = precioNoche * nochesParm;
+
+      // ── ESTRELLAS ──
+      let estrellas = '';
+      const starM = txt.match(/(\d)\s*star/i) || (document.querySelector('[class*="star"],[class*="rating"]')?.textContent||'').match(/(\d)/);
+      if (starM) estrellas = starM[1];
+
+      // ── RATING ──
+      const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
+      const reviewM = txt.match(/\(?(\d[\d,]+)\s*reviews?\)?/i);
+
+      return {
+        nombre, direccion, descripcion, amenities,
+        fotos: fotos.slice(0, 10),
+        precioNoche: precioNoche ? `US$ ${Math.round(precioNoche)}` : '',
+        precioTotal: precioTotal ? `US$ ${Math.round(precioTotal)}` : '',
+        noches: nochesParm,
+        estrellas, rating: ratingM?.[1]||'', reviews: reviewM?.[1]||''
+      };
+    }, noches);
+
+    await det.close();
+    await browser.close();
+
+    const fotosLimpias = data.fotos.filter(s => isGoodImg(s));
+    console.log(`✅ Detail: ${data.nombre} | ${fotosLimpias.length} fotos | ${data.amenities.length} amenities`);
+
+    emit('detalle', {
+      nombre: data.nombre,
+      direccion: data.direccion,
+      descripcion: data.descripcion,
+      amenities: data.amenities,
+      imagenes: fotosLimpias,
+      precioNoche: data.precioNoche,
+      precioTotal: data.precioTotal,
+      noches: data.noches,
+      estrellas: data.estrellas,
+      rating: data.rating,
+      reviews: data.reviews
+    });
+    emit('fin', {});
+
+  } catch(err) {
+    if (browser) await browser.close().catch(()=>{});
+    console.error('❌ detail:', err.message);
+    emit('error', { msg: err.message });
+  }
+  res.end();
+});
+
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v15 puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v16 puerto ${PORT}`));
