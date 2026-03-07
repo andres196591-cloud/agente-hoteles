@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 17 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 18 }));
 
 // ── Imágenes genéricas a bloquear ──
 const BAD_IMG_PATTERNS = [
@@ -55,7 +55,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v17 STREAM: "${ciudad}"`);
+  console.log(`🚀 v18 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -286,13 +286,13 @@ app.get('/stream-hoteles', async (req, res) => {
 
 // ══════════════════════════════════════════════════════
 // ENDPOINT: /hotel-detail — SSE detalle completo
-// Se llama cuando el usuario hace clic en un hotel
+// Estrategia: navegar al URL del hotel, esperar slick
+// carousel, scroll agresivo, extraer hasta 15 fotos
 // ══════════════════════════════════════════════════════
 app.get('/hotel-detail', async (req, res) => {
   const { enlace, checkin, checkout } = req.query;
   if (!enlace) { res.status(400).json({ error: 'no enlace' }); return; }
 
-  // Calcular noches
   let noches = 1;
   if (checkin && checkout) {
     const d1 = new Date(checkin), d2 = new Date(checkout);
@@ -318,33 +318,112 @@ app.get('/hotel-detail', async (req, res) => {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
     });
 
-    emit('status', { msg: 'Iniciando sesión...' });
+    emit('status', { msg: 'Iniciando sesión en el portal...' });
     await doLogin(ctx);
-    emit('status', { msg: 'Abriendo página del hotel...' });
+    emit('status', { msg: 'Abriendo ficha del hotel...' });
 
-    // ── PÁGINA DE DETALLE ──
     const det = await ctx.newPage();
-    await det.goto(enlace, { waitUntil: 'networkidle', timeout: 35000 });
-    await det.waitForTimeout(5000);
 
-    emit('status', { msg: 'Cargando fotos del hotel...' });
+    // Interceptar requests de imágenes para no bloquearlas
+    await det.route('**/*.{woff,woff2,ttf,otf}', route => route.abort());
 
-    // Scroll agresivo para activar lazy loading del carrusel slick
-    for (const pos of [300, 800, 1400, 2200, 3000, 1200, 0]) {
-      await det.evaluate(y => window.scrollTo(0, y), pos);
-      await det.waitForTimeout(700);
-    }
-    await det.waitForTimeout(2500);
+    // Navegar al URL exacto del hotel
+    await det.goto(enlace, { waitUntil: 'domcontentloaded', timeout: 40000 });
+    emit('status', { msg: 'Página cargada, esperando galería...' });
 
-    // Intentar activar el carrusel de fotos (click en imagen principal del portal)
+    // ── PASO 1: Esperar que la página SPA termine de renderizar ──
+    await det.waitForTimeout(4000);
+
+    // ── PASO 2: Esperar el carrusel slick ──
     try {
-      const mainImg = await det.$('.hotel-images__main-image-wrapper img, .hotel-images__image');
-      if (mainImg) { await mainImg.click(); await det.waitForTimeout(1500); }
-    } catch(e) { console.log('Gallery click:', e.message.substring(0,50)); }
+      await det.waitForSelector('.slick-slider, .hotel-images__image, .hotel-images__main-image-wrapper', {
+        timeout: 12000
+      });
+      console.log('✅ Galería detectada');
+    } catch(e) {
+      console.log('⚠️ Galería no detectada, continuando igual...');
+    }
 
-    await det.waitForTimeout(1000);
+    emit('status', { msg: 'Activando carrusel de fotos...' });
 
-    // ── EXTRACCIÓN COMPLETA con selectores específicos del portal membergetaways ──
+    // ── PASO 3: Scroll agresivo para activar lazy loading ──
+    // Primero hacia abajo para cargar todo
+    for (const pos of [200, 600, 1200, 1800, 2600, 3400, 1000, 0]) {
+      await det.evaluate(y => window.scrollTo(0, y), pos);
+      await det.waitForTimeout(500);
+    }
+    await det.waitForTimeout(1500);
+
+    // ── PASO 4: Activar el carrusel de imágenes ──
+    // Hacer clic en la imagen principal para abrir el carrusel completo
+    try {
+      const clicked = await det.evaluate(() => {
+        // Intentar clic en imagen principal del hotel
+        const targets = [
+          '.hotel-images__main-image-wrapper',
+          '.hotel-images__image',
+          '.slick-slide:not(.slick-cloned) img',
+          '[class*="hotel-images"] img'
+        ];
+        for (const sel of targets) {
+          const el = document.querySelector(sel);
+          if (el) {
+            el.click();
+            return sel;
+          }
+        }
+        return null;
+      });
+      if (clicked) {
+        console.log('✅ Click en galería:', clicked);
+        await det.waitForTimeout(2000);
+      }
+    } catch(e) { console.log('Gallery click err:', e.message.substring(0,60)); }
+
+    // ── PASO 5: Navegar el carrusel con teclas para forzar carga ──
+    // Esto activa el lazy loading de cada slide
+    try {
+      // Esperar que aparezca el slick track
+      await det.waitForSelector('.slick-track, .slick-list', { timeout: 5000 });
+
+      // Presionar flechas para avanzar slides y forzar carga de imágenes
+      for (let i = 0; i < 8; i++) {
+        await det.keyboard.press('ArrowRight');
+        await det.waitForTimeout(400);
+      }
+      // Regresar al inicio
+      for (let i = 0; i < 8; i++) {
+        await det.keyboard.press('ArrowLeft');
+        await det.waitForTimeout(200);
+      }
+      await det.waitForTimeout(1000);
+      console.log('✅ Carrusel navegado con teclas');
+    } catch(e) { console.log('Carousel nav:', e.message.substring(0,60)); }
+
+    // ── PASO 6: Scroll dentro del contenedor del carrusel ──
+    try {
+      await det.evaluate(() => {
+        const track = document.querySelector('.slick-track');
+        if (track) {
+          // Forzar que todas las imágenes lazy sean visibles
+          document.querySelectorAll('.slick-slide img[data-lazy], .slick-slide img[data-src]').forEach(img => {
+            const src = img.getAttribute('data-lazy') || img.getAttribute('data-src');
+            if (src) img.src = src;
+          });
+        }
+        // También forzar IntersectionObserver en todas las imágenes
+        document.querySelectorAll('img[data-src], img[data-lazy]').forEach(img => {
+          const src = img.getAttribute('data-src') || img.getAttribute('data-lazy');
+          if (src && src.startsWith('http')) img.src = src;
+        });
+      });
+      await det.waitForTimeout(2000);
+      console.log('✅ Lazy loading forzado');
+    } catch(e) {}
+
+    emit('status', { msg: 'Extrayendo información del hotel...' });
+
+    // ── PASO 7: EXTRACCIÓN COMPLETA ──
     const data = await det.evaluate((nochesParm) => {
       const BAD = ['logo','icon-','amenity','chain','flag','placeholder','noimage',
                    'package-D','no-image','blank.','default.jpg','rsi/assets'];
@@ -362,55 +441,82 @@ app.get('/hotel-detail', async (req, res) => {
       const visto = new Set();
       const addSrc = (src) => {
         if (!src || src.length < 12) return;
-        if (esUrlBuena(src) && !visto.has(src)) { visto.add(src); fotos.push(src); }
+        // Normalizar URL (quitar params de tamaño para versión limpia)
+        const clean = src.replace(/[?&](width|height|w|h|size|resize|crop)=[^&]*/gi,'').replace(/\?$/,'');
+        const key = clean.split('?')[0]; // deduplicar por path base
+        if (esUrlBuena(src) && !visto.has(key)) {
+          visto.add(key);
+          fotos.push(src); // guardar URL original con calidad
+        }
       };
 
-      // ── CAPA 1: Selectores EXACTOS del portal membergetaways (más confiables) ──
-
-      // Imagen principal
-      document.querySelectorAll('.hotel-images__main-image-wrapper img.hotel-images__image, .hotel-images__main-image-wrapper img')
-        .forEach(img => { addSrc(img.src || img.getAttribute('data-src') || ''); });
-
-      // Thumbnails de la galería estática
-      document.querySelectorAll('.hotel-images__other-image-wrapper img.hotel-images__image, .hotel-images__other-image-wrapper img')
-        .forEach(img => { addSrc(img.src || img.getAttribute('data-src') || ''); });
-
-      // Carrusel slick (las slides reales, no las clonadas)
-      document.querySelectorAll('.slick-slide:not(.slick-cloned) img.custom-carousel-image__item, .slick-slide:not(.slick-cloned) img')
+      // ── CAPA 1A: Imagen principal del portal ──
+      document.querySelectorAll('.hotel-images__main-image-wrapper img')
         .forEach(img => {
-          const attrs = ['src','data-src','data-lazy','data-original'];
-          for (const a of attrs) { const s = img.getAttribute(a)||''; if (s.startsWith('http')) { addSrc(s); break; } }
+          addSrc(img.src);
+          addSrc(img.getAttribute('data-src') || '');
+          addSrc(img.getAttribute('data-lazy') || '');
         });
 
-      // ── CAPA 2: Cualquier img con clase hotel-images__image en todo el DOM ──
-      document.querySelectorAll('img.hotel-images__image')
-        .forEach(img => { addSrc(img.src || img.getAttribute('data-src') || ''); });
+      // ── CAPA 1B: Thumbnails estáticos ──
+      document.querySelectorAll('.hotel-images__other-image-wrapper img')
+        .forEach(img => {
+          addSrc(img.src);
+          addSrc(img.getAttribute('data-src') || '');
+        });
 
-      // ── CAPA 3: Todos los data-* attrs en imgs restantes ──
-      if (fotos.length < 5) {
+      // ── CAPA 1C: Carrusel slick — slides reales (excluir clones) ──
+      document.querySelectorAll('.slick-slide:not(.slick-cloned) img')
+        .forEach(img => {
+          // Prioridad: src actual, luego data-lazy, data-src, data-original
+          const srcs = [
+            img.src,
+            img.getAttribute('data-lazy'),
+            img.getAttribute('data-src'),
+            img.getAttribute('data-original'),
+            img.getAttribute('data-image'),
+          ].filter(Boolean);
+          srcs.forEach(s => addSrc(s));
+        });
+
+      // ── CAPA 1D: Clase específica custom-carousel-image__item ──
+      document.querySelectorAll('img.custom-carousel-image__item')
+        .forEach(img => {
+          addSrc(img.src);
+          addSrc(img.getAttribute('data-lazy') || '');
+          addSrc(img.getAttribute('data-src') || '');
+        });
+
+      // ── CAPA 2: Cualquier img.hotel-images__image ──
+      document.querySelectorAll('img.hotel-images__image')
+        .forEach(img => { addSrc(img.src); addSrc(img.getAttribute('data-src')||''); });
+
+      // ── CAPA 3: Todos los imgs si aún tenemos pocas fotos ──
+      if (fotos.length < 4) {
         document.querySelectorAll('img').forEach(img => {
-          const attrs = ['src','data-src','data-lazy','data-original','data-image','data-full','data-large'];
-          for (const a of attrs) { const s = img.getAttribute(a)||''; if (s.startsWith('http')) addSrc(s); }
+          const attrs = ['src','data-src','data-lazy','data-original','data-image','data-full'];
+          attrs.forEach(a => { const s = img.getAttribute(a)||''; if (s.startsWith('http')) addSrc(s); });
           if (img.currentSrc) addSrc(img.currentSrc);
         });
       }
 
-      // ── CAPA 4: srcset ──
-      if (fotos.length < 5) {
-        document.querySelectorAll('img[srcset],source[srcset]').forEach(el => {
-          const parts = (el.srcset||'').split(',').map(s => {
-            const [url, w] = s.trim().split(' ');
-            return { url, w: parseInt(w)||0 };
-          }).filter(p => p.url && p.url.startsWith('http'));
+      // ── CAPA 4: srcset como último recurso ──
+      if (fotos.length < 4) {
+        document.querySelectorAll('img[srcset]').forEach(img => {
+          const parts = (img.srcset||'').split(',').map(s => {
+            const t = s.trim().split(' ');
+            return { url: t[0], w: parseInt(t[1])||0 };
+          }).filter(p => p.url?.startsWith('http'));
           parts.sort((a,b) => b.w - a.w);
           parts.forEach(p => addSrc(p.url));
         });
       }
 
-      // ── NOMBRE (selector exacto del portal) ──
+      // ── NOMBRE ──
       const nombre = (
         document.querySelector('.hotel-info__title')?.textContent ||
-        document.querySelector('h1,h2')?.textContent || ''
+        document.querySelector('h1')?.textContent ||
+        document.querySelector('h2')?.textContent || ''
       ).trim();
 
       // ── DIRECCIÓN ──
@@ -419,34 +525,30 @@ app.get('/hotel-detail', async (req, res) => {
         document.querySelector('[class*="address"]')?.textContent || ''
       ).trim().replace(/view map/gi,'').trim();
 
-      // ── DESCRIPCIÓN (selector exacto del portal) ──
+      // ── DESCRIPCIÓN ──
       let descripcion = '';
-      // Selector primario: .hotel-images__hotel-text (div > p interno)
       const descEl = document.querySelector('.hotel-images__hotel-text');
       if (descEl) {
         const inner = descEl.querySelector('p,div') || descEl;
         descripcion = (inner.innerText || inner.textContent || '').trim().substring(0, 1500);
       }
-      // Fallback genérico si el primario no funciona
       if (!descripcion || descripcion.length < 50) {
-        const descSels = ['[class*="description"]','[class*="about"]','[class*="overview"]'];
-        for (const s of descSels) {
+        for (const s of ['[class*="description"]','[class*="about"]','[class*="overview"]']) {
           for (const el of document.querySelectorAll(s)) {
             const t = (el.innerText||el.textContent||'').trim();
             if (t.length > 80 && t.length < 3000 && !t.includes('$')) {
               descripcion = t.substring(0, 1500); break;
             }
           }
-          if (descripcion && descripcion.length > 50) break;
+          if (descripcion.length > 50) break;
         }
       }
 
-      // ── AMENIDADES (selector exacto del portal) ──
+      // ── AMENIDADES ──
       const amenities = [];
       const amenVisto = new Set();
       const SKIP = /^(show more|show less|view map|reserve|book|check|select|filter|sort|price|per night|\$|US\$|refund|cancel|\d+ night|\d+ room)/i;
 
-      // Selector primario: .amenities__amenities-list .ant-list-item span
       document.querySelectorAll('.amenities__amenities-list .ant-list-item span')
         .forEach(el => {
           const t = (el.innerText||el.textContent||'').trim().replace(/\s+/g,' ');
@@ -454,9 +556,8 @@ app.get('/hotel-detail', async (req, res) => {
           amenVisto.add(t.toLowerCase()); amenities.push(t);
         });
 
-      // Fallback si no encontró con el selector exacto
       if (amenities.length < 3) {
-        for (const s of ['[class*="amenit"] li','[class*="amenit"] span','[class*="facilit"] li','[class*="feature"] li']) {
+        for (const s of ['[class*="amenit"] li','[class*="amenit"] span','[class*="facilit"] li']) {
           for (const el of document.querySelectorAll(s)) {
             const t = (el.innerText||el.textContent||'').trim().replace(/\s+/g,' ');
             if (t.length < 3 || t.length > 120 || SKIP.test(t) || amenVisto.has(t.toLowerCase())) continue;
@@ -467,61 +568,69 @@ app.get('/hotel-detail', async (req, res) => {
         }
       }
 
-      // ── PRECIOS (selector exacto del portal) ──
+      // ── PRECIO ──
       const txt = document.body.innerText || '';
       let precioNoche = 0;
 
-      // 1. Selector EXACTO: .hotel-card-wrapper__price-total-text (en la sección de rooms)
+      // 1. Selector exacto
       const allPriceEls = document.querySelectorAll('.hotel-card-wrapper__price-total-text');
       for (const pEl of allPriceEls) {
         const pM = (pEl.textContent||'').match(/([\d,]+\.?\d+)/);
         if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioNoche=v;break;} }
       }
 
-      // 2. Alternativas de selector
+      // 2. Alternativas
       if (!precioNoche) {
         for (const ps of ['[class*="price-total-text"]','[class*="price-total"] p','[class*="price-per-night"]']) {
-          const pEl = document.querySelector(ps);
-          if (pEl) { const pM=(pEl.textContent||'').match(/([\d,]+\.?\d+)/); if(pM){const v=parseFloat(pM[1].replace(/,/g,''));if(v>5){precioNoche=v;break;}} }
+          const el = document.querySelector(ps);
+          if (el) {
+            const m=(el.textContent||'').match(/([\d,]+\.?\d+)/);
+            if (m){const v=parseFloat(m[1].replace(/,/g,''));if(v>5){precioNoche=v;break;}}
+          }
         }
       }
 
       // 3. Patrón "From US$XX per night"
       if (!precioNoche) {
-        const fromM = txt.match(/[Ff]rom[\s\n]*US\$\s*([\d,]+\.?\d*)\s*[\n]*per night/);
+        const fromM = txt.match(/[Ff]rom[\s\n]*US\$\s*([\d,]+\.?\d*)/);
         if (fromM) { const v=parseFloat(fromM[1].replace(/,/g,'')); if(v>5) precioNoche=v; }
       }
 
-      // 4. Fallback: filtrar líneas de savings
+      // 4. Fallback filtrado
       if (!precioNoche) {
-        const txtClean = txt.split('\n')
+        const limpio = txt.split('\n')
           .filter(l => !/savings|public rate|save \d+%|client cash|you save/i.test(l))
           .join(' ');
-        const allP = (txtClean.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
+        const todos = (limpio.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
           .map(p=>parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
           .filter(n=>n>5&&n<99999);
-        if (allP.length) precioNoche = Math.min(...allP);
+        if (todos.length) precioNoche = Math.min(...todos);
       }
 
-      // ── RATING (selector exacto del portal) ──
+      // ── PARA INFO NOCHES DEL PORTAL ──
+      // Buscar el texto "for X nights" que el portal mismo muestra
+      const forNightsM = txt.match(/for\s+(\d+)\s+nights?/i);
+      const portalNoches = forNightsM ? parseInt(forNightsM[1]) : nochesParm;
+
+      // ── RATING ──
       const ratingEl = document.querySelector('.guest-ratings__reviews-rating');
       const ratingTxt = ratingEl?.textContent || '';
       const ratingM = ratingTxt.match(/(\d\.\d)/) || txt.match(/(\d\.\d{1,2})\s*\//);
-      const reviewM = txt.match(/\(?(\d[\d,]+)\s*reviews?\)?/i);
-      const starM = (document.querySelectorAll('.hotel-info__star').length > 0)
-        ? [null, document.querySelectorAll('.hotel-info__star').length.toString()]
-        : txt.match(/(\d)\s*star/i);
+      const reviewM = txt.match(/\(?[Bb]ased on\s+([\d,]+)|([\d,]+)\s+reviews?/i);
+      const nStars = document.querySelectorAll('.hotel-info__star').length;
+      const starM = nStars > 0 ? nStars.toString() : (txt.match(/(\d)\s*star/i)?.[1] || '');
 
       return {
         nombre, direccion, descripcion,
         amenities: amenities.slice(0, 20),
-        fotos: fotos.slice(0, 10),
+        fotos: fotos.slice(0, 15),  // hasta 15 fotos
         precioNoche: precioNoche ? `US$ ${precioNoche.toFixed(2)}` : '',
-        precioTotal: precioNoche ? `US$ ${(precioNoche * nochesParm).toFixed(2)}` : '',
-        noches: nochesParm,
-        estrellas: starM?.[1]||'',
-        rating: ratingM?.[1]||'',
-        reviews: reviewM?.[1]||''
+        precioTotal: precioNoche ? `US$ ${(precioNoche * portalNoches).toFixed(2)}` : '',
+        noches: portalNoches,
+        estrellas: starM,
+        rating: ratingM?.[1] || '',
+        reviews: (reviewM?.[1] || reviewM?.[2] || '').replace(/,/g,''),
+        debugFotos: fotos.length  // para debug en logs
       };
     }, noches);
 
@@ -529,7 +638,7 @@ app.get('/hotel-detail', async (req, res) => {
     await browser.close();
 
     const fotosLimpias = data.fotos.filter(s => isGoodImg(s));
-    console.log(`✅ Detail: "${data.nombre}" | ${fotosLimpias.length} fotos | ${data.amenities.length} amenities | ${noches} noches`);
+    console.log(`✅ Detail v18: "${data.nombre}" | fotos DOM: ${data.debugFotos} | limpias: ${fotosLimpias.length} | amenities: ${data.amenities.length} | precio: ${data.precioNoche} | noches: ${data.noches}`);
 
     emit('detalle', {
       nombre: data.nombre,
@@ -548,11 +657,11 @@ app.get('/hotel-detail', async (req, res) => {
 
   } catch(err) {
     if (browser) await browser.close().catch(()=>{});
-    console.error('❌ detail:', err.message);
+    console.error('❌ detail v18:', err.message);
     emit('error', { msg: err.message });
   }
   res.end();
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v17 puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v18 puerto ${PORT}`));
