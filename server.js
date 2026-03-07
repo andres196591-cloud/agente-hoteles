@@ -177,28 +177,44 @@ app.get('/stream-hoteles', async (req, res) => {
 
             const link = el.querySelector('a[href*="detail"],a[href*="hotel"],a[href*="property"],a')?.href || '';
 
-            // Precio: buscar en selectores específicos de precio primero
+            // Precio: selector exacto del portal membergetaways
             let precioFinal = 0;
-            // 1. Buscar en el elemento específico de precio (per night / internet rate)
-            const priceSels = [
-              '[class*="price-per-night"]','[class*="nightly"]','[class*="per-night"]',
-              '[class*="internet-rate"]','[class*="member-rate"]','[class*="rate-amount"]',
-              '[class*="from-price"]','[class*="starting-price"]'
-            ];
-            for (const ps of priceSels) {
-              const pEl = el.querySelector(ps);
-              if (pEl) {
-                const pM = (pEl.textContent||'').match(/US\$\s*([\d,]+\.?\d*)/);
-                if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioFinal=v;break;} }
+            // 1. Selector EXACTO del portal (clase hotel-card-wrapper__price-total-text)
+            const pExact = el.querySelector('.hotel-card-wrapper__price-total-text');
+            if (pExact) {
+              const pM = (pExact.textContent||'').match(/([\d,]+\.?\d+)/);
+              if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5) precioFinal=v; }
+            }
+            // 2. Selectores alternativos por si cambia la clase
+            if (!precioFinal) {
+              const altSels = [
+                '[class*="price-total-text"]',
+                '[class*="price-total"] p',
+                '[class*="price-total"] span',
+                '[class*="total-price"]',
+                '[class*="price-per-night"]',
+                '[class*="nightly-rate"]'
+              ];
+              for (const ps of altSels) {
+                const pEl = el.querySelector(ps);
+                if (pEl) {
+                  const pM = (pEl.textContent||'').match(/([\d,]+\.?\d+)/);
+                  if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioFinal=v;break;} }
+                }
               }
             }
-            // 2. Fallback: todos los precios del texto, pero solo > $5 para evitar badges/UI
+            // 3. Fallback: texto completo filtrando < $5 y "Savings" context
             if (!precioFinal) {
-              const allP = (txt.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
+              // Excluir líneas que contengan "savings" o "public" o "save"
+              const txtLines = txt.split('\n').filter(l => 
+                !/savings|public rate|save \d+|client cash/i.test(l)
+              ).join(' ');
+              const allP = (txtLines.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
                 .map(p=>parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
                 .filter(n=>n>5&&n<99999);
               if (allP.length) precioFinal = Math.min(...allP);
             }
+
 
             const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
             const reviewM = txt.match(/\(?(\d[\d,]+)\s*reviews?\)?/i);
@@ -447,35 +463,44 @@ app.get('/hotel-detail', async (req, res) => {
         if (amenities.length >= 12) break;
       }
 
-      // ── PRECIOS — buscar en selectores específicos para evitar valores falsos ──
+      // ── PRECIOS — selector exacto del portal membergetaways ──
       const txt = document.body.innerText || '';
       let precioNoche = 0;
 
-      // 1. Buscar precio en elementos específicos del portal membergetaways
-      const priceSelectors = [
-        '[class*="price-per-night"]', '[class*="nightly-rate"]', '[class*="per-night"]',
-        '[class*="internet-rate"] [class*="price"]', '[class*="internet-rate"] [class*="amount"]',
-        '[class*="member-price"]', '[class*="your-price"]', '[class*="sale-price"]',
-        '[class*="from"] [class*="price"]', '.price-value', '.rate-value',
-        '[class*="price-box"] [class*="amount"]'
+      // 1. Selector EXACTO de la página de detalle del portal
+      //    En la página de detalle el precio total está en hotel-card-wrapper__price-total-text
+      //    o en selectores similares de la página de detalle
+      const detailPriceSels = [
+        '.hotel-card-wrapper__price-total-text',
+        '[class*="price-total-text"]',
+        '[class*="price-total"] p',
+        '[class*="room-price"] [class*="amount"]',
+        '[class*="room-rate"] [class*="price"]',
+        '[class*="total-price-value"]',
+        '[class*="price-per-night"]',
+        '[class*="nightly-rate"]',
+        '[class*="from-price"]'
       ];
-      for (const ps of priceSelectors) {
+      for (const ps of detailPriceSels) {
         const pEl = document.querySelector(ps);
         if (pEl) {
-          const pM = (pEl.textContent||'').match(/US\$\s*([\d,]+\.?\d*)/);
+          const pM = (pEl.textContent||'').match(/([\d,]+\.?\d+)/);
           if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioNoche=v;break;} }
         }
       }
 
-      // 2. Buscar el bloque 'From US$XX per night' que es el patrón del portal
+      // 2. Patrón textual "From US$XX per night" o "US$XX per night"
       if (!precioNoche) {
         const fromM = txt.match(/[Ff]rom[\s\n]*US\$\s*([\d,]+\.?\d*)\s*[\n]*per night/);
         if (fromM) { const v=parseFloat(fromM[1].replace(/,/g,'')); if(v>5) precioNoche=v; }
       }
 
-      // 3. Fallback: todos los precios, filtrando valores claramente inválidos (<$5)
+      // 3. Fallback: texto filtrando contextos de "savings/public/save"
       if (!precioNoche) {
-        const allP = (txt.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
+        const txtClean = txt.split('\n')
+          .filter(l => !/savings|public rate|save \d+%|client cash|you save/i.test(l))
+          .join(' ');
+        const allP = (txtClean.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
           .map(p=>parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
           .filter(n=>n>5&&n<99999);
         if (allP.length) precioNoche = Math.min(...allP);
