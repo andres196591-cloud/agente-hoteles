@@ -282,19 +282,36 @@ app.get('/hotel-detail', async (req, res) => {
 
     emit('status', { msg: 'Iniciando sesión...' });
     await doLogin(ctx);
-    emit('status', { msg: 'Cargando galería y detalles del hotel...' });
+    emit('status', { msg: 'Abriendo página del hotel...' });
 
     // ── PÁGINA DE DETALLE ──
     const det = await ctx.newPage();
-    await det.goto(enlace, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await det.waitForTimeout(4000);
+    await det.goto(enlace, { waitUntil: 'networkidle', timeout: 35000 });
+    await det.waitForTimeout(5000);
 
-    // Scroll para activar lazy loading de imágenes
-    emit('status', { msg: 'Cargando fotos...' });
-    for (const pos of [400, 900, 1600, 2400, 0]) {
+    emit('status', { msg: 'Cargando fotos del hotel...' });
+
+    // Intentar abrir la galería haciendo clic en la imagen principal
+    try {
+      // Clic en la imagen hero/principal para abrir galería
+      const heroSelectors = [
+        '[class*="gallery"] img', '[class*="hero"] img', '[class*="slider"] img',
+        '[class*="main-image"] img', '[class*="property-image"] img',
+        '.image-gallery img', '[class*="photo"] img:first-child'
+      ];
+      for (const sel of heroSelectors) {
+        const el = await det.$(sel);
+        if (el) { await el.click(); await det.waitForTimeout(2000); break; }
+      }
+    } catch(e) { console.log('Gallery click:', e.message.substring(0,50)); }
+
+    // Scroll agresivo para activar lazy loading
+    for (const pos of [300, 700, 1200, 1800, 2500, 3200, 0]) {
       await det.evaluate(y => window.scrollTo(0, y), pos);
-      await det.waitForTimeout(800);
+      await det.waitForTimeout(600);
     }
+    // Volver arriba y esperar que carguen
+    await det.waitForTimeout(2000);
 
     // ── EXTRACCIÓN COMPLETA ──
     const data = await det.evaluate((nochesParm) => {
@@ -310,39 +327,63 @@ app.get('/hotel-detail', async (req, res) => {
                lower.match(/\.(jpg|jpeg|png|webp)/i);
       };
 
-      // ── FOTOS ──
+      // ── FOTOS — extracción agresiva para portal membergetaways ──
       const fotos = [];
       const visto = new Set();
 
-      // 1. Galerías específicas
-      const galSels = [
-        '[class*="gallery"] img','[class*="slider"] img','[class*="carousel"] img',
-        '[class*="photo"] img','[class*="hero"] img','[class*="image-gallery"] img',
-        '[class*="media"] img','[data-testid*="image"] img','[class*="room"] img'
-      ];
-      for (const sel of galSels) {
-        document.querySelectorAll(sel).forEach(img => {
-          const src = img.src || img.dataset.src || img.getAttribute('data-lazy') || img.getAttribute('data-original') || '';
-          if (!esUrlBuena(src) || visto.has(src)) return;
-          const w = img.naturalWidth || img.width || 0;
-          if (w > 0 && w < 80) return;
-          visto.add(src); fotos.push(src);
-        });
-      }
-      // 2. srcset
-      document.querySelectorAll('img[srcset],source[srcset]').forEach(el => {
-        (el.srcset||'').split(',').map(s=>s.trim().split(' ')[0])
-          .filter(s=>s.startsWith('http')).forEach(src => {
-            if (esUrlBuena(src) && !visto.has(src)) { visto.add(src); fotos.push(src); }
-          });
-      });
-      // 3. Todas las imágenes (fallback)
+      const addSrc = (src) => {
+        if (!src || src.length < 12) return;
+        // Limpiar query strings de tamaño para obtener mayor resolución
+        const cleanSrc = src.split('?')[0].includes('.') ? src : src;
+        if (esUrlBuena(cleanSrc) && !visto.has(cleanSrc)) {
+          visto.add(cleanSrc); fotos.push(cleanSrc);
+        }
+      };
+
+      // 1. Todas las imágenes del DOM con todos los atributos posibles
       document.querySelectorAll('img').forEach(img => {
-        const src = img.src || img.dataset.src || img.getAttribute('data-lazy') || '';
-        if (!esUrlBuena(src) || visto.has(src)) return;
-        const w = img.naturalWidth || img.width || 0;
-        if (w > 0 && w < 80) return;
-        visto.add(src); fotos.push(src);
+        const attrs = ['src','data-src','data-lazy','data-original','data-image',
+                       'data-full','data-large','data-zoom-image','data-highres'];
+        for (const a of attrs) {
+          const s = img.getAttribute(a) || '';
+          if (s.startsWith('http')) addSrc(s);
+        }
+        // naturalSrc si está disponible
+        if (img.currentSrc) addSrc(img.currentSrc);
+      });
+
+      // 2. srcset — preferir la versión más grande
+      document.querySelectorAll('img[srcset],source[srcset]').forEach(el => {
+        const parts = (el.srcset||'').split(',').map(s => {
+          const [url, w] = s.trim().split(' ');
+          return { url, w: parseInt(w)||0 };
+        }).filter(p => p.url && p.url.startsWith('http'));
+        // Ordenar por ancho descendente para tener mayor resolución
+        parts.sort((a,b) => b.w - a.w);
+        parts.forEach(p => addSrc(p.url));
+      });
+
+      // 3. Background images en CSS (algunos portales las usan)
+      document.querySelectorAll('[style*="background"]').forEach(el => {
+        const m = (el.getAttribute('style')||'').match(/url\(['"]?(https?[^'")\s]+)['"]?\)/i);
+        if (m) addSrc(m[1]);
+      });
+
+      // 4. Buscar URLs de imágenes en atributos data-* de contenedores
+      document.querySelectorAll('[data-images],[data-photos],[data-gallery]').forEach(el => {
+        try {
+          const val = el.getAttribute('data-images') || el.getAttribute('data-photos') || el.getAttribute('data-gallery') || '';
+          const urls = val.match(/https?:\/\/[^\s"',\]]+\.(jpg|jpeg|png|webp)/gi) || [];
+          urls.forEach(u => addSrc(u));
+        } catch(e) {}
+      });
+
+      // 5. Buscar en scripts inline (algunos SPA guardan las imágenes en JSON)
+      document.querySelectorAll('script:not([src])').forEach(sc => {
+        const txt = sc.textContent || '';
+        if (!txt.includes('travelapi') && !txt.includes('expedia') && !txt.includes('media')) return;
+        const urls = (txt.match(/https?:\/\/\S+\.(?:jpg|jpeg|png|webp)/gi) || []);
+        urls.slice(0, 20).forEach(u => addSrc(u));
       });
 
       // ── NOMBRE ──
