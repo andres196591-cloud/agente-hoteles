@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 26 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 27 }));
 
 // ── CACHÉ EN MEMORIA: guarda sesión y URL de resultados por búsqueda ──
 // Clave: "destino|checkin|checkout"  Valor: { searchUrl, cookies, ts }
@@ -64,7 +64,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v26 STREAM: "${ciudad}"`);
+  console.log(`🚀 v27 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -426,55 +426,71 @@ app.get('/hotel-detail', async (req, res) => {
     const nBotones = await page.$$eval('.hotel-card-wrapper__price-btn', btns => btns.length);
     console.log(`🔘 Botones Select room: ${nBotones}`);
 
-    // ── Buscar el hotel por nombre y hacer clic en SU botón ──
-    // Estrategia: buscar el contenedor .hotel-card-wrapper que tenga el nombre,
-    // y hacer clic en su propio .hotel-card-wrapper__price-btn
+    // ── Estrategia correcta: cada botón → subir al .hotel-card → leer nombre ──
+    // El portal tiene: .hotel-card > .hotel-card-wrapper > ... > .hotel-card-wrapper__price-btn
     let clickResult = await page.evaluate((buscarNombre) => {
-      const debug = [];
+      const btns = Array.from(document.querySelectorAll('.hotel-card-wrapper__price-btn'));
+      const buscar = buscarNombre.toLowerCase().trim();
+      const palabras = buscar.split(/\s+/).filter(p => p.length > 2);
+      const allNames = [];
 
-      // Opción A: buscar por contenedor de tarjeta completa
-      const containers = document.querySelectorAll('.hotel-card-wrapper, .hotel-card, [class*="result-wrapper__wrapper"]');
-      debug.push('Contenedores encontrados: ' + containers.length);
+      for (let i = 0; i < btns.length; i++) {
+        const btn = btns[i];
 
-      for (const card of containers) {
-        // Buscar el nombre dentro de la tarjeta
-        const nameEl = card.querySelector('h2,h3,h4,strong,[class*="hotel-name"],[class*="property-name"],[class*="title"]');
+        // Subir hasta encontrar .hotel-card (el contenedor raíz de la tarjeta)
+        let card = btn;
+        for (let j = 0; j < 10; j++) {
+          card = card.parentElement;
+          if (!card) break;
+          if (card.classList.contains('hotel-card') || card.classList.contains('hotel-card-wrapper__slider')) break;
+        }
+        if (!card) continue;
+
+        // El nombre está en .hotel-card-wrapper__content — primer h2/h3/strong dentro de la tarjeta
+        const hotelCard = btn.closest('.hotel-card') || btn.closest('[class*="hotel-card"]');
+        const nameEl = hotelCard
+          ? (hotelCard.querySelector('h2,h3,h4') ||
+             hotelCard.querySelector('[class*="name"],[class*="title"],[class*="heading"]'))
+          : null;
         const cardName = (nameEl?.innerText || nameEl?.textContent || '').trim().toLowerCase();
-        if (!cardName || cardName.length < 3) continue;
 
-        debug.push('Tarjeta: ' + cardName.substring(0, 40));
+        allNames.push(cardName || '(sin nombre ' + i + ')');
 
-        // Verificar si el nombre coincide
-        const buscar = buscarNombre.toLowerCase().trim();
-        // Comparar las primeras palabras significativas
-        const palabras = buscar.split(' ').filter(p => p.length > 2);
+        if (!cardName) continue;
+
+        // Coincidencia: al menos 60% de las palabras del nombre buscado están en el nombre de la tarjeta
         const coincide = palabras.length > 0
           ? palabras.filter(p => cardName.includes(p)).length >= Math.ceil(palabras.length * 0.6)
-          : cardName.includes(buscar.substring(0, 10));
+          : cardName.includes(buscar.substring(0, 8));
 
         if (coincide) {
-          const btn = card.querySelector('.hotel-card-wrapper__price-btn, [class*="price-btn"]');
-          if (btn) {
-            btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            btn.click();
-            return { ok: true, found: true, cardName, debug };
-          }
+          btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          btn.click();
+          return { ok: true, found: true, idx: i, cardName };
         }
       }
 
-      // Opción B: no encontró por nombre — loggear qué nombres hay y usar fallback
-      debug.push('No coincidió ninguno con: ' + buscarNombre);
-      const primerBtn = document.querySelector('.hotel-card-wrapper__price-btn, [class*="price-btn"]');
-      if (primerBtn) {
-        primerBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        primerBtn.click();
-        return { ok: true, found: false, fallback: true, debug };
+      // Sin coincidencia — loggear nombres encontrados
+      console.log('Nombres en DOM:', allNames.join(' | '));
+
+      // Fallback: primer botón
+      if (btns.length > 0) {
+        btns[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        btns[0].click();
+        return { ok: true, found: false, fallback: true, allNames };
       }
-      return { ok: false, debug };
+      return { ok: false, allNames };
     }, nombre);
 
-    console.log('🖱️ Click result:', JSON.stringify(clickResult));
-    if (clickResult.debug) console.log('🔍 Debug:', clickResult.debug.join(' | '));
+    console.log('🖱️ Click:', JSON.stringify({
+      ok: clickResult.ok,
+      found: clickResult.found,
+      cardName: clickResult.cardName || 'N/A',
+      fallback: clickResult.fallback || false
+    }));
+    if (clickResult.allNames) {
+      console.log('📋 Nombres en página:', (clickResult.allNames||[]).slice(0,5).join(' | '));
+    }
 
     console.log('🖱️ Click result:', JSON.stringify(clickResult));
 
