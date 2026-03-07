@@ -5,7 +5,16 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 23 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 24 }));
+
+// ── CACHÉ EN MEMORIA: guarda sesión y URL de resultados por búsqueda ──
+// Clave: "destino|checkin|checkout"  Valor: { searchUrl, cookies, ts }
+const searchCache = new Map();
+const CACHE_TTL = 25 * 60 * 1000; // 25 minutos
+
+function cacheKey(destino, checkin, checkout) {
+  return `${(destino||'').toLowerCase().trim()}|${checkin||''}|${checkout||''}`;
+}
 
 // ── Imágenes genéricas a bloquear ──
 const BAD_IMG_PATTERNS = [
@@ -55,7 +64,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v23 STREAM: "${ciudad}"`);
+  console.log(`🚀 v24 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -149,6 +158,18 @@ app.get('/stream-hoteles', async (req, res) => {
 
     emit('status', { msg: `Cargando resultados para ${ciudad}...` });
     await page.waitForTimeout(12000);
+
+    // ── GUARDAR SESIÓN EN CACHÉ para que /hotel-detail no repita la búsqueda ──
+    try {
+      const cookies = await ctx.cookies();
+      const key = cacheKey(ciudad, checkin, checkout);
+      searchCache.set(key, { searchUrl: page.url(), cookies, ts: Date.now() });
+      console.log(`💾 Sesión cacheada: "${key}" → ${page.url().substring(0,60)}`);
+      // Limpiar entradas viejas
+      for (const [k, v] of searchCache.entries()) {
+        if (Date.now() - v.ts > CACHE_TTL) searchCache.delete(k);
+      }
+    } catch(e) { console.log('⚠️ Cache error:', e.message); }
 
     // ── EXTRACCIÓN RÁPIDA (solo lo básico de cada tarjeta) ──
     const extraerLista = async () => {
@@ -317,47 +338,55 @@ app.get('/hotel-detail', async (req, res) => {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
     });
 
-    emit('status', { msg: 'Iniciando sesión...' });
-    await doLogin(ctx);
+    // ── BUSCAR SESIÓN EN CACHÉ (evita repetir login+búsqueda) ──
+    const key = cacheKey(destino, checkin, checkout);
+    const cached = searchCache.get(key);
+    let page;
 
-    const page = await ctx.newPage();
-
-    // ── Navegar siempre a búsqueda con destino ──
-    // Ya no usamos enlace (contiene URL del portal que bloquea Mod_Security)
-    const searchUrl = 'https://portal.membergetaways.com/rsi/search';
-
-    emit('status', { msg: 'Buscando el hotel...' });
-    console.log('🔍 Navegando a:', searchUrl.substring(0, 80));
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-    await page.waitForTimeout(5000);
-
-    // Hacer la búsqueda con el destino recibido
-    if (destino) {
-      try {
-        await page.waitForSelector('.ant-select-selection-search-input', { timeout: 10000 });
-        await page.click('.ant-select-selection-search-input');
-        await page.waitForTimeout(400);
-        await page.type('.ant-select-selection-search-input', destino.split(',')[0].trim(), { delay: 150 });
-        await page.waitForTimeout(3000);
-        const opts = await page.$$('.ant-select-item-option');
-        if (opts.length > 0) await opts[0].click();
-        else await page.keyboard.press('Enter');
-        await page.waitForTimeout(1000);
-        await page.evaluate(() => {
-          const b = document.querySelector('.search-button');
-          if (b) b.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        });
-        console.log('✅ Búsqueda ejecutada para:', destino);
-        // Igual que el stream — esperar ~30s a que carguen los hoteles
-        emit('status', { msg: 'Cargando resultados del portal (30 segundos)...' });
-        await page.waitForTimeout(15000);
-        // Scroll para activar más resultados
-        await page.evaluate(() => window.scrollTo(0, 600));
-        await page.waitForTimeout(5000);
-        await page.evaluate(() => window.scrollTo(0, 0));
-        await page.waitForTimeout(3000);
-      } catch(e) {
-        console.log('⚠️ Búsqueda fallida:', e.message.substring(0,60));
+    if (cached && (Date.now() - cached.ts < CACHE_TTL)) {
+      console.log(`✅ Caché HIT: "${key}" → reutilizando sesión`);
+      emit('status', { msg: 'Sesión activa encontrada, cargando resultados...' });
+      // Inyectar cookies de sesión del stream
+      await ctx.addCookies(cached.cookies);
+      page = await ctx.newPage();
+      // Ir directamente al URL de resultados — ya tenemos sesión y búsqueda lista
+      await page.goto(cached.searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(8000); // esperar que recarguen los resultados
+    } else {
+      console.log(`⚠️ Caché MISS: "${key}" → haciendo búsqueda completa`);
+      emit('status', { msg: 'Iniciando búsqueda en el portal...' });
+      await doLogin(ctx);
+      page = await ctx.newPage();
+      await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 35000 });
+      await page.waitForTimeout(5000);
+      if (destino) {
+        try {
+          await page.waitForSelector('.ant-select-selection-search-input', { timeout: 10000 });
+          await page.click('.ant-select-selection-search-input');
+          await page.waitForTimeout(400);
+          await page.type('.ant-select-selection-search-input', destino.split(',')[0].trim(), { delay: 150 });
+          await page.waitForTimeout(3000);
+          const opts = await page.$$('.ant-select-item-option');
+          if (opts.length > 0) await opts[0].click();
+          else await page.keyboard.press('Enter');
+          await page.waitForTimeout(1000);
+          await page.evaluate(() => {
+            const b = document.querySelector('.search-button');
+            if (b) b.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          });
+          emit('status', { msg: 'Cargando resultados (30 segundos)...' });
+          await page.waitForTimeout(15000);
+          await page.evaluate(() => window.scrollTo(0, 600));
+          await page.waitForTimeout(5000);
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await page.waitForTimeout(3000);
+          // Guardar en caché para próximas veces
+          const newCookies = await ctx.cookies();
+          searchCache.set(key, { searchUrl: page.url(), cookies: newCookies, ts: Date.now() });
+          console.log('💾 Nueva sesión cacheada desde detail');
+        } catch(e) {
+          console.log('⚠️ Búsqueda fallida:', e.message.substring(0,60));
+        }
       }
     }
 
