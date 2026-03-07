@@ -5,13 +5,11 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 27 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 28 }));
 
 // ── CACHÉ EN MEMORIA: guarda sesión y URL de resultados por búsqueda ──
-// Clave: "destino|checkin|checkout"  Valor: { searchUrl, cookies, ts }
 const searchCache = new Map();
 const CACHE_TTL = 25 * 60 * 1000; // 25 minutos
-
 function cacheKey(destino, checkin, checkout) {
   return `${(destino||'').toLowerCase().trim()}|${checkin||''}|${checkout||''}`;
 }
@@ -64,7 +62,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v27 STREAM: "${ciudad}"`);
+  console.log(`🚀 v28 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -90,20 +88,20 @@ app.get('/stream-hoteles', async (req, res) => {
 
     // ── BUSCADOR ──
     const page = await ctx.newPage();
-    await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 40000 });
-    await page.waitForTimeout(8000);
+    await page.goto('https://portal.membergetaways.com/rsi/search', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(5000);
 
     // ── DESTINO — con retry si falla el selector ──
     let inputFound = false;
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await page.waitForSelector('.ant-select-selection-search-input', { timeout: 18000 });
+        await page.waitForSelector('.ant-select-selection-search-input', { timeout: 12000 });
         inputFound = true;
         break;
       } catch {
         console.log(`⚠️ Intento ${attempt+1}: selector no encontrado, recargando...`);
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForTimeout(8000);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.waitForTimeout(5000);
       }
     }
     if (!inputFound) {
@@ -159,17 +157,16 @@ app.get('/stream-hoteles', async (req, res) => {
     emit('status', { msg: `Cargando resultados para ${ciudad}...` });
     await page.waitForTimeout(12000);
 
-    // ── GUARDAR SESIÓN EN CACHÉ para que /hotel-detail no repita la búsqueda ──
+    // ── GUARDAR SESIÓN EN CACHÉ ──
     try {
       const cookies = await ctx.cookies();
       const key = cacheKey(ciudad, checkin, checkout);
       searchCache.set(key, { searchUrl: page.url(), cookies, ts: Date.now() });
-      console.log(`💾 Sesión cacheada: "${key}" → ${page.url().substring(0,60)}`);
-      // Limpiar entradas viejas
-      for (const [k, v] of searchCache.entries()) {
+      console.log(`💾 Caché: "${key}"`);
+      for (const [k,v] of searchCache.entries()) {
         if (Date.now() - v.ts > CACHE_TTL) searchCache.delete(k);
       }
-    } catch(e) { console.log('⚠️ Cache error:', e.message); }
+    } catch(e) {}
 
     // ── EXTRACCIÓN RÁPIDA (solo lo básico de cada tarjeta) ──
     const extraerLista = async () => {
@@ -745,4 +742,4 @@ async function scrapeAndEmit(page, noches, emit, isGoodImg) {
 }
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v21 puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v28 puerto ${PORT}`));
