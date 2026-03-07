@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 20 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 21 }));
 
 // ── Imágenes genéricas a bloquear ──
 const BAD_IMG_PATTERNS = [
@@ -55,7 +55,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v20 STREAM: "${ciudad}"`);
+  console.log(`🚀 v21 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -440,18 +440,17 @@ app.get('/hotel-detail', async (req, res) => {
 
     const page = await ctx.newPage();
 
-    // ── Navegar a la búsqueda con las fechas y destino ──
-    // El enlace que viene del stream ES el URL del buscador con params
-    const searchUrl = (enlace && enlace.includes('membergetaways')) ? enlace
-      : 'https://portal.membergetaways.com/rsi/search';
+    // ── Navegar siempre a búsqueda con destino ──
+    // Ya no usamos enlace (contiene URL del portal que bloquea Mod_Security)
+    const searchUrl = 'https://portal.membergetaways.com/rsi/search';
 
     emit('status', { msg: 'Buscando el hotel...' });
     console.log('🔍 Navegando a:', searchUrl.substring(0, 80));
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
     await page.waitForTimeout(5000);
 
-    // Si llegamos a la página de búsqueda vacía, hacer la búsqueda con destino
-    if (page.url().includes('/rsi/search') && destino) {
+    // Hacer la búsqueda con el destino recibido
+    if (destino) {
       try {
         await page.waitForSelector('.ant-select-selection-search-input', { timeout: 10000 });
         await page.click('.ant-select-selection-search-input');
@@ -780,4 +779,4 @@ async function scrapeAndEmit(page, noches, emit, isGoodImg) {
 }
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v20 puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v21 puerto ${PORT}`));
