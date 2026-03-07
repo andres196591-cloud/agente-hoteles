@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 22 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 23 }));
 
 // ── Imágenes genéricas a bloquear ──
 const BAD_IMG_PATTERNS = [
@@ -55,7 +55,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v22 STREAM: "${ciudad}"`);
+  console.log(`🚀 v23 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -347,8 +347,15 @@ app.get('/hotel-detail', async (req, res) => {
           const b = document.querySelector('.search-button');
           if (b) b.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         });
-        await page.waitForTimeout(10000);
         console.log('✅ Búsqueda ejecutada para:', destino);
+        // Igual que el stream — esperar ~30s a que carguen los hoteles
+        emit('status', { msg: 'Cargando resultados del portal (30 segundos)...' });
+        await page.waitForTimeout(15000);
+        // Scroll para activar más resultados
+        await page.evaluate(() => window.scrollTo(0, 600));
+        await page.waitForTimeout(5000);
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.waitForTimeout(3000);
       } catch(e) {
         console.log('⚠️ Búsqueda fallida:', e.message.substring(0,60));
       }
@@ -356,19 +363,29 @@ app.get('/hotel-detail', async (req, res) => {
 
     emit('status', { msg: 'Esperando tarjetas de hotel...' });
 
-    // Esperar que aparezcan botones Select room
+    // Esperar que aparezcan botones Select room (el portal tarda ~30s)
+    emit('status', { msg: 'Esperando que carguen las tarifas...' });
     try {
-      await page.waitForSelector('.hotel-card-wrapper__price-btn', { timeout: 20000 });
+      await page.waitForSelector('.hotel-card-wrapper__price-btn', { timeout: 35000 });
+      await page.waitForTimeout(2000); // esperar que carguen todas las tarjetas
       console.log('✅ Botones Select room visibles');
     } catch(e) {
-      console.log('⚠️ Botones no encontrados, continuando...');
+      console.log('⚠️ Botones no encontrados después de 35s');
+      // Intentar scroll y esperar más
+      await page.evaluate(() => window.scrollTo(0, 800));
+      await page.waitForTimeout(5000);
     }
 
     // Scroll para cargar todas las tarjetas
-    for (const pos of [400, 900, 1600, 0]) {
+    for (const pos of [400, 900, 1600, 2400, 0]) {
       await page.evaluate(y => window.scrollTo(0, y), pos);
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(1000);
     }
+    await page.waitForTimeout(2000);
+
+    // Log cuántas tarjetas y botones hay
+    const nCards = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
+    console.log(`🔘 Botones Select room encontrados: ${nCards}`);
 
     emit('status', { msg: `Localizando: ${nombreParam || ''}...` });
 
