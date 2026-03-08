@@ -5,13 +5,13 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 32 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 33 }));
 
-// ── CACHÉ EN MEMORIA: guarda sesión y URL de resultados por búsqueda ──
+// ── CACHÉ: guarda cookies+URL de búsqueda por destino/fechas ──
 const searchCache = new Map();
-const CACHE_TTL = 25 * 60 * 1000; // 25 minutos
-function cacheKey(destino, checkin, checkout) {
-  return `${(destino||'').toLowerCase().trim()}|${checkin||''}|${checkout||''}`;
+const CACHE_TTL = 25 * 60 * 1000;
+function cacheKey(d, ci, co) {
+  return `${(d||'').toLowerCase().trim()}|${ci||''}|${co||''}`;
 }
 
 // ── Imágenes genéricas a bloquear ──
@@ -62,7 +62,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v32 STREAM: "${ciudad}"`);
+  console.log(`🚀 v33 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -162,10 +162,9 @@ app.get('/stream-hoteles', async (req, res) => {
       const cookies = await ctx.cookies();
       const key = cacheKey(ciudad, checkin, checkout);
       searchCache.set(key, { searchUrl: page.url(), cookies, ts: Date.now() });
-      console.log(`💾 Caché: "${key}"`);
-      for (const [k,v] of searchCache.entries()) {
+      console.log(`💾 Caché guardado: "${key}"`);
+      for (const [k,v] of searchCache.entries())
         if (Date.now() - v.ts > CACHE_TTL) searchCache.delete(k);
-      }
     } catch(e) {}
 
     // ── EXTRACCIÓN RÁPIDA (solo lo básico de cada tarjeta) ──
@@ -278,7 +277,7 @@ app.get('/stream-hoteles', async (req, res) => {
           const key = h.nombre.toLowerCase();
           if (!enviados.has(key)) {
             enviados.add(key);
-            h.portalIdx = total; // índice de posición en la lista del portal
+            h.portalIdx = total;
             emit('hotel', { hotel: h });
             total++;
           }
@@ -419,31 +418,20 @@ app.get('/hotel-detail', async (req, res) => {
     console.log(`🎯 Hotel: "${nombreParam}" | idx: ${portalIdx}`);
 
     // ── SCROLL HASTA TENER SUFICIENTES BOTONES ──
-    // Necesitamos idx+1 botones en pantalla para hacer clic en el correcto.
-    // Enviamos heartbeat SSE cada vuelta para mantener la conexión con Railway.
     const targetBtns = (portalIdx !== null) ? portalIdx + 1 : 15;
-    let scrollRound = 0;
-    while (scrollRound < 40) {
+    let prevCount = 0;
+    for (let s = 0; s < 40; s++) {
       const nActual = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
-      console.log(`📜 Scroll ${scrollRound}: ${nActual}/${targetBtns} botones`);
-      // Heartbeat SSE para que Railway no cierre la conexión
-      emit('status', { msg: `Cargando lista... ${nActual} hoteles (buscando #${targetBtns})` });
+      console.log(`📜 Scroll ${s}: ${nActual}/${targetBtns}`);
       if (nActual >= targetBtns) break;
-      // Si llevamos 5 rondas sin crecer, el portal llegó al final
-      if (scrollRound > 5) {
-        const nAnterior = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
-        if (nAnterior === nActual) { 
-          console.log('📜 Sin más hoteles que cargar');
-          break; 
-        }
-      }
+      if (s > 3 && nActual === prevCount) { console.log('📜 Fin de lista'); break; }
+      prevCount = nActual;
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await page.waitForTimeout(1500); // 1.5s por ronda = ~60s para idx:97 (40 rondas)
-      scrollRound++;
+      await page.waitForTimeout(2000);
     }
 
     const nBotones = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
-    console.log(`🔘 Botones finales: ${nBotones} (necesitaba: ${targetBtns})`);
+    console.log(`🔘 Botones: ${nBotones} (necesitaba: ${targetBtns})`);
 
     let clickResult = await page.evaluate(({ pIdx, nombre }) => {
       const btns = Array.from(document.querySelectorAll('.hotel-card-wrapper__price-btn'));
