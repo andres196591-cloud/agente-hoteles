@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 28 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 29 }));
 
 // ── CACHÉ EN MEMORIA: guarda sesión y URL de resultados por búsqueda ──
 const searchCache = new Map();
@@ -62,7 +62,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v28 STREAM: "${ciudad}"`);
+  console.log(`🚀 v29 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -278,6 +278,7 @@ app.get('/stream-hoteles', async (req, res) => {
           const key = h.nombre.toLowerCase();
           if (!enviados.has(key)) {
             enviados.add(key);
+            h.portalIdx = total; // índice de posición en la lista del portal
             emit('hotel', { hotel: h });
             total++;
           }
@@ -308,7 +309,8 @@ app.get('/stream-hoteles', async (req, res) => {
 // hotel por nombre, espera 8s y extrae todo
 // ══════════════════════════════════════════════════════
 app.get('/hotel-detail', async (req, res) => {
-  const { enlace, checkin, checkout, nombre: nombreParam, destino } = req.query;
+  const { enlace, checkin, checkout, nombre: nombreParam, destino, idx } = req.query;
+  const portalIdx = (idx !== undefined && idx !== '') ? parseInt(idx) : null;
 
   let noches = 1;
   if (checkin && checkout) {
@@ -414,79 +416,48 @@ app.get('/hotel-detail', async (req, res) => {
     console.log(`🔘 Botones Select room encontrados: ${nCards}`);
 
     emit('status', { msg: `Localizando: ${nombreParam || ''}...` });
+    console.log(`🎯 Hotel: "${nombreParam}" | idx: ${portalIdx}`);
 
-    // ── Hacer clic en Select room del hotel correcto ──
-    const nombre = (nombreParam || '').toLowerCase().trim();
-    console.log('🎯 Buscando hotel:', nombre);
+    // ── CLIC POR ÍNDICE — el más confiable ──
+    // El stream asignó portalIdx a cada hotel. Aquí hacemos clic en el botón número N.
+    const nBotones = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
+    console.log(`🔘 Botones en página: ${nBotones}`);
 
-    // Contar botones disponibles
-    const nBotones = await page.$$eval('.hotel-card-wrapper__price-btn', btns => btns.length);
-    console.log(`🔘 Botones Select room: ${nBotones}`);
-
-    // ── Estrategia correcta: cada botón → subir al .hotel-card → leer nombre ──
-    // El portal tiene: .hotel-card > .hotel-card-wrapper > ... > .hotel-card-wrapper__price-btn
-    let clickResult = await page.evaluate((buscarNombre) => {
+    let clickResult = await page.evaluate(({ pIdx, nombre }) => {
       const btns = Array.from(document.querySelectorAll('.hotel-card-wrapper__price-btn'));
-      const buscar = buscarNombre.toLowerCase().trim();
-      const palabras = buscar.split(/\s+/).filter(p => p.length > 2);
-      const allNames = [];
 
+      // ── Método 1: clic directo por índice (lo más confiable) ──
+      if (pIdx !== null && pIdx >= 0 && pIdx < btns.length) {
+        btns[pIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        btns[pIdx].click();
+        const c = btns[pIdx].closest('.hotel-card') || btns[pIdx].closest('[class*="hotel-card"]');
+        const name = (c?.querySelector('h2,h3,h4')?.textContent || '').trim();
+        return { ok: true, method: 'idx', pIdx, clickedName: name };
+      }
+
+      // ── Método 2: buscar por nombre (si no hay índice) ──
+      const buscar = (nombre || '').toLowerCase().trim();
+      const palabras = buscar.split(/\s+/).filter(p => p.length > 3);
       for (let i = 0; i < btns.length; i++) {
-        const btn = btns[i];
-
-        // Subir hasta encontrar .hotel-card (el contenedor raíz de la tarjeta)
-        let card = btn;
-        for (let j = 0; j < 10; j++) {
-          card = card.parentElement;
-          if (!card) break;
-          if (card.classList.contains('hotel-card') || card.classList.contains('hotel-card-wrapper__slider')) break;
-        }
-        if (!card) continue;
-
-        // El nombre está en .hotel-card-wrapper__content — primer h2/h3/strong dentro de la tarjeta
-        const hotelCard = btn.closest('.hotel-card') || btn.closest('[class*="hotel-card"]');
-        const nameEl = hotelCard
-          ? (hotelCard.querySelector('h2,h3,h4') ||
-             hotelCard.querySelector('[class*="name"],[class*="title"],[class*="heading"]'))
-          : null;
-        const cardName = (nameEl?.innerText || nameEl?.textContent || '').trim().toLowerCase();
-
-        allNames.push(cardName || '(sin nombre ' + i + ')');
-
+        const c = btns[i].closest('.hotel-card') || btns[i].closest('[class*="hotel-card"]');
+        const cardName = (c?.querySelector('h2,h3,h4')?.textContent || '').trim().toLowerCase();
         if (!cardName) continue;
-
-        // Coincidencia: al menos 60% de las palabras del nombre buscado están en el nombre de la tarjeta
-        const coincide = palabras.length > 0
-          ? palabras.filter(p => cardName.includes(p)).length >= Math.ceil(palabras.length * 0.6)
-          : cardName.includes(buscar.substring(0, 8));
-
-        if (coincide) {
-          btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          btn.click();
-          return { ok: true, found: true, idx: i, cardName };
+        const hits = palabras.filter(p => cardName.includes(p)).length;
+        if (hits >= Math.ceil(palabras.length * 0.6)) {
+          btns[i].scrollIntoView({ behavior: 'smooth', block: 'center' });
+          btns[i].click();
+          return { ok: true, method: 'nombre', pIdx: i, clickedName: cardName };
         }
       }
 
-      // Sin coincidencia — loggear nombres encontrados
-      console.log('Nombres en DOM:', allNames.join(' | '));
+      return { ok: false, totalBtns: btns.length, msg: 'Sin coincidencia por índice ni nombre' };
+    }, { pIdx: portalIdx, nombre: (nombreParam || '').toLowerCase().trim() });
 
-      // Fallback: primer botón
-      if (btns.length > 0) {
-        btns[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-        btns[0].click();
-        return { ok: true, found: false, fallback: true, allNames };
-      }
-      return { ok: false, allNames };
-    }, nombre);
+    console.log('🖱️ Click result:', JSON.stringify(clickResult));
 
-    console.log('🖱️ Click:', JSON.stringify({
-      ok: clickResult.ok,
-      found: clickResult.found,
-      cardName: clickResult.cardName || 'N/A',
-      fallback: clickResult.fallback || false
-    }));
-    if (clickResult.allNames) {
-      console.log('📋 Nombres en página:', (clickResult.allNames||[]).slice(0,5).join(' | '));
+    if (!clickResult.ok) {
+      emit('error', { msg: `Hotel no encontrado (${nBotones} botones en página). Intenta de nuevo.` });
+      await browser.close(); res.end(); return;
     }
 
     console.log('🖱️ Click result:', JSON.stringify(clickResult));
