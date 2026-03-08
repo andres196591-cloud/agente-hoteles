@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 33 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 34 }));
 
 // ── CACHÉ: guarda cookies+URL de búsqueda por destino/fechas ──
 const searchCache = new Map();
@@ -62,7 +62,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v33 STREAM: "${ciudad}"`);
+  console.log(`🚀 v34 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -433,59 +433,16 @@ app.get('/hotel-detail', async (req, res) => {
     const nBotones = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
     console.log(`🔘 Botones: ${nBotones} (necesitaba: ${targetBtns})`);
 
-    let clickResult = await page.evaluate(({ pIdx, nombre }) => {
+    let clickResult = await page.evaluate((pIdx) => {
       const btns = Array.from(document.querySelectorAll('.hotel-card-wrapper__price-btn'));
-      const buscar = (nombre || '').toLowerCase().trim();
-      const palabras = buscar.split(/\s+/).filter(p => p.length > 3);
-
-      const getName = (btn) => {
-        const c = btn.closest('.hotel-card') || btn.closest('[class*="hotel-card"]');
-        return (c?.querySelector('h2,h3,h4')?.textContent || '').trim().toLowerCase();
-      };
-      const matches = (cardName) => {
-        if (!cardName || !buscar) return false;
-        const hits = palabras.filter(p => cardName.includes(p)).length;
-        return hits >= Math.ceil(palabras.length * 0.6);
-      };
-
-      // ── Método 1: índice + verificar nombre ──
+      // Clic directo por índice — sin verificar nombre
       if (pIdx !== null && pIdx >= 0 && pIdx < btns.length) {
-        const nameAtIdx = getName(btns[pIdx]);
-        if (matches(nameAtIdx)) {
-          // Índice Y nombre coinciden — perfecto
-          btns[pIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
-          btns[pIdx].click();
-          return { ok: true, method: 'idx+nombre', pIdx, clickedName: nameAtIdx };
-        }
-        // El índice no coincide con el nombre — el orden cambió, buscar por nombre
+        btns[pIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        btns[pIdx].click();
+        return { ok: true, pIdx };
       }
-
-      // ── Método 2: buscar por nombre en toda la lista ──
-      for (let i = 0; i < btns.length; i++) {
-        const cardName = getName(btns[i]);
-        if (matches(cardName)) {
-          btns[i].scrollIntoView({ behavior: 'smooth', block: 'center' });
-          btns[i].click();
-          return { ok: true, method: 'nombre', pIdx: i, clickedName: cardName };
-        }
-      }
-
-      // ── Método 3: coincidencia parcial más flexible ──
-      // A veces el portal abrevia nombres (ej: "Live Tulum" vs "Live Tulum, A Member...")
-      const primeraPalabra = palabras[0] || buscar.substring(0, 8);
-      for (let i = 0; i < btns.length; i++) {
-        const cardName = getName(btns[i]);
-        if (cardName && cardName.includes(primeraPalabra)) {
-          btns[i].scrollIntoView({ behavior: 'smooth', block: 'center' });
-          btns[i].click();
-          return { ok: true, method: 'parcial', pIdx: i, clickedName: cardName };
-        }
-      }
-
-      // Loguear qué nombres hay para debug
-      const allNames = btns.slice(0,8).map((b,i) => i + ':' + getName(b).substring(0,25));
-      return { ok: false, totalBtns: btns.length, allNames, buscado: buscar };
-    }, { pIdx: portalIdx, nombre: (nombreParam || '').toLowerCase().trim() });
+      return { ok: false, totalBtns: btns.length };
+    }, portalIdx);
 
     console.log('🖱️ Click result:', JSON.stringify(clickResult));
 
