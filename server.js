@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 31 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 32 }));
 
 // ── CACHÉ EN MEMORIA: guarda sesión y URL de resultados por búsqueda ──
 const searchCache = new Map();
@@ -62,7 +62,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v31 STREAM: "${ciudad}"`);
+  console.log(`🚀 v32 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -419,21 +419,31 @@ app.get('/hotel-detail', async (req, res) => {
     console.log(`🎯 Hotel: "${nombreParam}" | idx: ${portalIdx}`);
 
     // ── SCROLL HASTA TENER SUFICIENTES BOTONES ──
-    // El portal carga hoteles en lotes mientras se hace scroll.
-    // Necesitamos scroll hasta que haya al menos portalIdx+1 botones.
+    // Necesitamos idx+1 botones en pantalla para hacer clic en el correcto.
+    // Enviamos heartbeat SSE cada vuelta para mantener la conexión con Railway.
     const targetBtns = (portalIdx !== null) ? portalIdx + 1 : 15;
     let scrollRound = 0;
-    while (scrollRound < 30) {
+    while (scrollRound < 40) {
       const nActual = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
-      console.log(`📜 Scroll ${scrollRound}: ${nActual} botones (necesito ${targetBtns})`);
+      console.log(`📜 Scroll ${scrollRound}: ${nActual}/${targetBtns} botones`);
+      // Heartbeat SSE para que Railway no cierre la conexión
+      emit('status', { msg: `Cargando lista... ${nActual} hoteles (buscando #${targetBtns})` });
       if (nActual >= targetBtns) break;
+      // Si llevamos 5 rondas sin crecer, el portal llegó al final
+      if (scrollRound > 5) {
+        const nAnterior = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
+        if (nAnterior === nActual) { 
+          console.log('📜 Sin más hoteles que cargar');
+          break; 
+        }
+      }
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(1500); // 1.5s por ronda = ~60s para idx:97 (40 rondas)
       scrollRound++;
     }
 
     const nBotones = await page.$$eval('.hotel-card-wrapper__price-btn', b => b.length).catch(() => 0);
-    console.log(`🔘 Botones finales en página: ${nBotones}`);
+    console.log(`🔘 Botones finales: ${nBotones} (necesitaba: ${targetBtns})`);
 
     let clickResult = await page.evaluate(({ pIdx, nombre }) => {
       const btns = Array.from(document.querySelectorAll('.hotel-card-wrapper__price-btn'));
