@@ -167,94 +167,82 @@ app.get('/stream-hoteles', async (req, res) => {
         if (Date.now() - v.ts > CACHE_TTL) searchCache.delete(k);
     } catch(e) {}
 
-    // ── EXTRACCIÓN RÁPIDA (solo lo básico de cada tarjeta) ──
+    // ── EXTRACCIÓN: itera .hotel-card-wrapper__price-btn igual que el detail ──
+    // CRÍTICO: el stream y el detail DEBEN usar el mismo orden de elementos
+    // para que portalIdx sea consistente. Ambos usan el mismo selector de botones.
     const extraerLista = async () => {
       return page.evaluate(() => {
+        const BAD = ['logo','icon-','amenity','chain','flag','placeholder',
+                     'noimage','default.jpg','blank.','rsi/assets','package-D'];
         const results = [];
-        const visto = new Set();
-        document.querySelectorAll('img').forEach(img => {
-          const src = img.src || '';
-          if (!src || src.length < 10) return;
-          const lower = src.toLowerCase();
-          const esReal = (lower.includes('travelapi') || lower.includes('expedia') || lower.includes('media')) && lower.match(/\.(jpg|jpeg|png|webp)/i);
-          if (!esReal) return;
 
-          let el = img.parentElement;
-          for (let i = 0; i < 12; i++) {
-            if (!el) break;
-            const txt = el.innerText || '';
-            if (!txt.match(/US\$\s*[\d]+/)) { el = el.parentElement; continue; }
-            const nameEl = el.querySelector('h2,h3,h4,strong');
-            if (!nameEl) { el = el.parentElement; continue; }
-            const nombre = nameEl.textContent.trim();
-            if (nombre.length < 4 || nombre.length > 150) { el = el.parentElement; continue; }
-            if (/^(refundable|non-refund|select|compare|view map|internet|priceline|filter|sort|star rating|amenities|save)/i.test(nombre)) { el = el.parentElement; continue; }
-            if (visto.has(nombre)) break;
-            visto.add(nombre);
+        const btns = document.querySelectorAll('.hotel-card-wrapper__price-btn');
 
-            const link = el.querySelector('a[href*="detail"],a[href*="hotel"],a[href*="property"],a')?.href || '';
+        btns.forEach((btn, btnIdx) => {
+          // Subir al contenedor raíz de la tarjeta
+          const card = btn.closest('.hotel-card') || btn.closest('[class*="result-wrapper"]');
+          if (!card) return;
 
-            // Precio: selector exacto del portal membergetaways
-            let precioFinal = 0;
-            // 1. Selector EXACTO del portal (clase hotel-card-wrapper__price-total-text)
-            const pExact = el.querySelector('.hotel-card-wrapper__price-total-text');
-            if (pExact) {
-              const pM = (pExact.textContent||'').match(/([\d,]+\.?\d+)/);
-              if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5) precioFinal=v; }
+          const txt = card.innerText || card.textContent || '';
+
+          // Nombre: primer h2/h3/h4 dentro de la tarjeta
+          const nameEl = card.querySelector('h2,h3,h4');
+          const nombre = (nameEl?.textContent || '').trim();
+          if (!nombre || nombre.length < 4 || nombre.length > 150) return;
+          if (/^(refundable|non-refund|select|compare|view map|filter|sort)/i.test(nombre)) return;
+
+          // Imagen: primera imagen real de la tarjeta
+          let src = '';
+          const imgs = card.querySelectorAll('img');
+          for (const img of imgs) {
+            const s = img.src || img.getAttribute('data-src') || '';
+            const l = s.toLowerCase();
+            if (s.length < 10) continue;
+            if (BAD.some(p => l.includes(p))) continue;
+            if ((l.includes('travelapi') || l.includes('expedia') || l.includes('media') || l.includes('hotelbeds'))
+                && l.match(/\.(jpg|jpeg|png|webp)/i)) {
+              src = s; break;
             }
-            // 2. Selectores alternativos por si cambia la clase
-            if (!precioFinal) {
-              const altSels = [
-                '[class*="price-total-text"]',
-                '[class*="price-total"] p',
-                '[class*="price-total"] span',
-                '[class*="total-price"]',
-                '[class*="price-per-night"]',
-                '[class*="nightly-rate"]'
-              ];
-              for (const ps of altSels) {
-                const pEl = el.querySelector(ps);
-                if (pEl) {
-                  const pM = (pEl.textContent||'').match(/([\d,]+\.?\d+)/);
-                  if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5){precioFinal=v;break;} }
-                }
-              }
-            }
-            // 3. Fallback: texto completo filtrando < $5 y "Savings" context
-            if (!precioFinal) {
-              // Excluir líneas que contengan "savings" o "public" o "save"
-              const txtLines = txt.split('\n').filter(l => 
-                !/savings|public rate|save \d+|client cash/i.test(l)
-              ).join(' ');
-              const allP = (txtLines.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
-                .map(p=>parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
-                .filter(n=>n>5&&n<99999);
-              if (allP.length) precioFinal = Math.min(...allP);
-            }
-
-
-            const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
-            const reviewM = txt.match(/\(?(\d[\d,]+)\s*reviews?\)?/i);
-            const saveM = txt.match(/save\s*(\d+)%/i);
-            const addrEl = el.querySelector('[class*="address"],[class*="location"]');
-            const distM = txt.match(/([\d.]+\s*miles?\s*from[^,\n]+)/i);
-
-            results.push({
-              nombre,
-              precio: precioFinal ? `US$ ${Math.round(precioFinal)}` : '',
-              imagen: src,
-              imagenes: [src],
-              rating: ratingM ? ratingM[1] : '',
-              reviews: reviewM ? reviewM[1] : '',
-              ahorro: saveM ? `Save ${saveM[1]}%` : '',
-              direccion: (addrEl?.textContent?.trim() || distM?.[0] || '').replace(/view map/gi,'').trim().substring(0, 150),
-              enlace: link,
-              descripcion: '',
-              fuente: 'portal'
-            });
-            break;
           }
+
+          // Precio
+          let precioFinal = 0;
+          const pExact = card.querySelector('.hotel-card-wrapper__price-total-text');
+          if (pExact) {
+            const pM = (pExact.textContent||'').match(/([\d,]+\.?\d+)/);
+            if (pM) { const v=parseFloat(pM[1].replace(/,/g,'')); if(v>5) precioFinal=v; }
+          }
+          if (!precioFinal) {
+            const txtLines = txt.split('\n')
+              .filter(l => !/savings|public rate|save \d+|client cash/i.test(l)).join(' ');
+            const allP = (txtLines.match(/US\$\s*[\d,]+\.?\d*/gi)||[])
+              .map(p=>parseFloat(p.replace(/US\$\s*/i,'').replace(/,/g,'')))
+              .filter(n=>n>5&&n<99999);
+            if (allP.length) precioFinal = Math.min(...allP);
+          }
+
+          const ratingM = txt.match(/(\d\.\d{1,2})\s*\(/);
+          const reviewM = txt.match(/\(?(\d[\d,]+)\s*reviews?\)?/i);
+          const saveM   = txt.match(/save\s*(\d+)%/i);
+          const addrEl  = card.querySelector('[class*="address"],[class*="location"]');
+          const distM   = txt.match(/([\d.]+\s*miles?\s*from[^,\n]+)/i);
+
+          results.push({
+            nombre,
+            precio:    precioFinal ? `US$ ${Math.round(precioFinal)}` : '',
+            imagen:    src,
+            imagenes:  [src],
+            rating:    ratingM ? ratingM[1] : '',
+            reviews:   reviewM ? reviewM[1] : '',
+            ahorro:    saveM   ? `Save ${saveM[1]}%` : '',
+            direccion: (addrEl?.textContent?.trim()||distM?.[0]||'').replace(/view map/gi,'').trim().substring(0,150),
+            enlace:    '',
+            descripcion: '',
+            fuente:    'portal',
+            _btnIdx:   btnIdx   // posición exacta del botón — para debug
+          });
         });
+
         return results;
       });
     };
@@ -704,4 +692,4 @@ async function scrapeAndEmit(page, noches, emit, isGoodImg) {
 }
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v28 puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v34 puerto ${PORT}`));
