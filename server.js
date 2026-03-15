@@ -5,7 +5,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/ping', (req, res) => res.json({ ok: true, v: 34 }));
+app.get('/ping', (req, res) => res.json({ ok: true, v: 35 }));
 
 // ── CACHÉ: guarda cookies+URL de búsqueda por destino/fechas ──
 const searchCache = new Map();
@@ -62,7 +62,7 @@ app.get('/stream-hoteles', async (req, res) => {
   if (!destino) { res.status(400).end(); return; }
 
   const ciudad = destino.split(',')[0].trim();
-  console.log(`🚀 v34 STREAM: "${ciudad}"`);
+  console.log(`🚀 v35 STREAM: "${ciudad}"`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -227,6 +227,13 @@ app.get('/stream-hoteles', async (req, res) => {
           const addrEl  = card.querySelector('[class*="address"],[class*="location"]');
           const distM   = txt.match(/([\d.]+\s*miles?\s*from[^,\n]+)/i);
 
+          // Amenidades: iconos con alt text en .hotel-card-wrapper__description
+          const amenidades = [];
+          card.querySelectorAll('.hotel-card-wrapper__description img[alt]').forEach(ic => {
+            const a = (ic.alt||'').trim();
+            if (a && a.length > 1 && a.length < 40) amenidades.push(a);
+          });
+
           results.push({
             nombre,
             precio:    precioFinal ? `US$ ${Math.round(precioFinal)}` : '',
@@ -238,8 +245,9 @@ app.get('/stream-hoteles', async (req, res) => {
             direccion: (addrEl?.textContent?.trim()||distM?.[0]||'').replace(/view map/gi,'').trim().substring(0,150),
             enlace:    '',
             descripcion: '',
+            amenidades,
             fuente:    'portal',
-            _btnIdx:   btnIdx   // posición exacta del botón — para debug
+            _btnIdx:   btnIdx
           });
         });
 
@@ -692,4 +700,4 @@ async function scrapeAndEmit(page, noches, emit, isGoodImg) {
 }
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v34 puerto ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🤖 v35 puerto ${PORT}`));
